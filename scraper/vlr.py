@@ -1,7 +1,6 @@
 import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
-import pandas as pd 
 import os
 
 os.makedirs("data", exist_ok=True)

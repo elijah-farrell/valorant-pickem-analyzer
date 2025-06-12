@@ -52,6 +52,7 @@ def export_agent_stats(stats, player):
             row.update(vals)
             rows.append(row)
     pd.DataFrame(rows).to_excel(filename, index=False)
+    autosize_excel_columns(filename)
     print(f"[+] Agent stats exported for {player} → {filename}")
 
 def export_kills_by_match(good_matches, player):
@@ -75,6 +76,7 @@ def export_kills_by_match(good_matches, player):
     with pd.ExcelWriter(filename) as writer:
         pd.DataFrame(summary).to_excel(writer, sheet_name='Match Summary', index=False)
         pd.DataFrame(detail).to_excel(writer, sheet_name='Map Kills Detail', index=False)
+    autosize_excel_columns(filename)
     print(f"[+] Kills by match exported for {player} → {filename}")
 
 def compute_averages(good_matches, windows=(5, 10, 25)):
@@ -121,6 +123,24 @@ def color_code_excel(file_path):
 
     wb.save(file_path)
     print(f"[+] Excel color coding applied to: {file_path}")
+
+def autosize_excel_columns(file_path):
+    wb = openpyxl.load_workbook(file_path)
+    for ws in wb.worksheets:
+        for col in ws.columns:
+            max_length = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                try:
+                    cell_len = len(str(cell.value)) if cell.value else 0
+                    if cell_len > max_length:
+                        max_length = cell_len
+                except Exception:
+                    pass
+            adjusted_width = max_length + 2  # Padding
+            ws.column_dimensions[col_letter].width = adjusted_width
+    wb.save(file_path)
+    print(f"[+] Excel auto-column width formatting applied: {file_path}")
 
 def do_specific_player():
     player = input("Enter player name: ").strip()
@@ -249,6 +269,7 @@ def do_full_slate():
     out_file = os.path.join(BASE_DATA_DIR, filename)
     df_summary.to_excel(out_file, index=False)
     color_code_excel(out_file)
+    autosize_excel_columns(out_file)
     print(f"[Success] Pick'em summary table exported: {out_file}")
 
 def main():
