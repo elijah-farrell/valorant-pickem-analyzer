@@ -28,6 +28,11 @@ def compute_averages(good_matches, windows=(5, 10, 25)):
 def index():
     return send_from_directory('static', 'index.html')
 
+@app.route('/health')
+def health():
+    """Health check endpoint for Render to keep service alive"""
+    return jsonify({'status': 'ok', 'service': 'valorant-pickem-analyzer'})
+
 @app.route('/styles.css')
 def styles():
     return send_from_directory('static', 'styles.css')
@@ -282,5 +287,8 @@ def get_player_stats(player_name):
         return jsonify({'error': f'Error processing player: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') != 'production'
+    app.run(debug=debug, host='0.0.0.0', port=port)
 

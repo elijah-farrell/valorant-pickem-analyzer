@@ -1,4 +1,7 @@
-const API_BASE = 'http://localhost:5000/api';
+// API base URL - set by index.html script tag or defaults to localhost
+const API_BASE = (typeof window !== 'undefined' && window.API_BASE_URL) 
+    ? window.API_BASE_URL 
+    : 'http://localhost:5000/api';
 
 function showLoading() {
     document.getElementById('loading').classList.remove('hidden');
