@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "buildCommand": "",
+  "outputDirectory": "static",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/$1"
+    }
+  ]
+}
+
