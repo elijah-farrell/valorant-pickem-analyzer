@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Valorant Pick'em Analyzer</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Valorant Pick'em Analyzer</h1>
+            <p>Compare Underdog lines with VLR.gg stats</p>
+        </header>
+
+        <div class="controls">
+            <button id="loadSlate" class="btn-primary">Load Underdog Slate</button>
+            <div class="search-box">
+                <input type="text" id="playerSearch" placeholder="Search player stats...">
+                <button id="searchPlayer" class="btn-secondary">Search</button>
+            </div>
+        </div>
+
+        <div id="loading" class="loading hidden">Loading...</div>
+        <div id="error" class="error hidden"></div>
+
+        <div id="results"></div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
+

@@ -1,4 +1,4 @@
-pandas
-openpyxl
 beautifulsoup4
 requests
+flask
+flask-cors
