@@ -2,3 +2,4 @@ beautifulsoup4
 requests
 flask
 flask-cors
+flask-limiter

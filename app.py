@@ -1,5 +1,7 @@
-from flask import Flask, jsonify, send_from_directory, send_file
+from flask import Flask, jsonify, send_from_directory, send_file, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from scraper.underdog import get_pickem_slate
 from scraper.vlr import (
     find_player_url,
@@ -11,9 +13,40 @@ from scraper.vlr import (
     fetch_soup,
 )
 import traceback
+import os
 
 app = Flask(__name__, static_folder='static', static_url_path='')
-CORS(app)
+
+# CORS configuration - restrict to your Vercel domain only
+# Set ALLOWED_ORIGINS in Render environment variables:
+# Format: "https://your-app.vercel.app,https://your-app-git-main.vercel.app"
+# Include both production and preview URLs
+allowed_origins_env = os.environ.get('ALLOWED_ORIGINS', '').strip()
+if allowed_origins_env:
+    # Production: restrict to specific domains
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(',') if origin.strip()]
+else:
+    # Development: allow all (for local testing)
+    allowed_origins = '*'
+    
+CORS(app, origins=allowed_origins, supports_credentials=True)
+
+# Rate limiting
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"  # In-memory storage (fine for single instance)
+)
+
+# Error handler for rate limit exceeded
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({
+        'error': 'Rate limit exceeded',
+        'message': 'Too many requests. Please try again later.',
+        'retry_after': e.description
+    }), 429
 
 MAX_MATCHES = 40
 
@@ -29,6 +62,7 @@ def index():
     return send_from_directory('static', 'index.html')
 
 @app.route('/health')
+@limiter.exempt  # Health check shouldn't be rate limited
 def health():
     """Health check endpoint for Render to keep service alive"""
     return jsonify({'status': 'ok', 'service': 'valorant-pickem-analyzer'})
@@ -46,6 +80,7 @@ def favicon():
     return send_from_directory('config', 'valorant.ico')
 
 @app.route('/api/slate', methods=['GET'])
+@limiter.limit("10 per minute")  # Limit to 10 requests per minute per IP
 def get_slate():
     """Get Underdog pick'em slate with VLR stats comparison"""
     try:
@@ -207,6 +242,7 @@ def get_slate():
         return jsonify({'error': error_msg, 'details': str(e)}), 500
 
 @app.route('/api/player/<player_name>', methods=['GET'])
+@limiter.limit("20 per minute")  # Limit to 20 requests per minute per IP
 def get_player_stats(player_name):
     """Get detailed stats for a specific player"""
     try:
