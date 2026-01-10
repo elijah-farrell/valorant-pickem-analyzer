@@ -193,13 +193,13 @@ tbody tr:last-child td {
 
 .error-cell {
     color: #ef4444;
-    text-align: center;
+    text-align: left;
     cursor: help;
 }
 
 .success-cell {
     color: #22c55e;
-    text-align: center;
+    text-align: left;
 }
 
 .empty-state {

@@ -108,6 +108,127 @@ def scrape_current_team(soup: BeautifulSoup):
             return team_div.text.strip()
     return None
 
+def get_team_url_from_player(player_url):
+    """Get the team's VLR page URL from a player's page"""
+    soup = fetch_soup(player_url)
+    if not soup:
+        return None
+    
+    team_header = soup.find("h2", string=lambda s: s and "Current Teams" in s)
+    if not team_header:
+        return None
+    
+    wf_card = team_header.find_next_sibling("div", class_="wf-card")
+    if not wf_card:
+        return None
+    
+    team_link = wf_card.find("a", class_="wf-module-item", href=True)
+    if team_link:
+        href = team_link.get('href', '')
+        if href:
+            if href.startswith('/team/'):
+                return BASE_URL + href
+            elif href.startswith('http'):
+                return href
+            elif '/team/' in href:
+                return BASE_URL + href
+    return None
+
+def get_match_from_team(team_url):
+    """Get the next match URL from a team's VLR page (the next game they play)"""
+    soup = fetch_soup(team_url)
+    if not soup:
+        return []
+    
+    match_urls = []
+    # Look for upcoming matches section on team page
+    # VLR team pages have upcoming matches listed first
+    # Check for "upcoming" or "next" match sections
+    upcoming_sections = soup.select(".wf-module, .upcoming-matches, [class*='upcoming'], [class*='next']")
+    
+    # Also check all links for match URLs, but prioritize upcoming sections
+    all_links = soup.select("a[href]")
+    for link in all_links:
+        href = link.get('href', '')
+        if not href:
+            continue
+        
+        # Check if it's a match URL (numeric ID)
+        if href.startswith('/'):
+            path = href.strip('/')
+            parts = path.split('/')
+            if len(parts) > 0 and parts[0].isdigit() and len(parts[0]) >= 4:
+                full_url = BASE_URL + href
+                if full_url not in match_urls:
+                    match_urls.append(full_url)
+        elif href.startswith('http') and 'vlr.gg' in href:
+            # Check if it's a match URL
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(href)
+                path = parsed.path.strip('/')
+                parts = path.split('/')
+                if len(parts) > 0 and parts[0].isdigit() and len(parts[0]) >= 4:
+                    if href not in match_urls:
+                        match_urls.append(href)
+            except:
+                pass
+    
+    # Filter for only upcoming matches and return just the first one
+    upcoming_matches = []
+    now = datetime.now()
+    
+    for match_url in match_urls:
+        try:
+            # Check if match is upcoming by fetching the match page
+            match_soup = fetch_soup(match_url)
+            if not match_soup:
+                continue
+            
+            # Get match date
+            match_date_str = get_match_date(match_soup)
+            if match_date_str == "<Unknown Date>":
+                # If we can't get date, assume it might be upcoming and check later
+                upcoming_matches.append(match_url)
+                continue
+            
+            # Try to parse date and check if it's in the future
+            try:
+                # Try different date formats
+                if ":" in match_date_str or len(match_date_str) > 10:
+                    # Has time component or is longer format
+                    match_date = datetime.strptime(match_date_str.split()[0], "%Y-%m-%d")
+                else:
+                    match_date = datetime.strptime(match_date_str, "%Y-%m-%d")
+                
+                # If match date is today or in the future, it's upcoming
+                if match_date >= now.replace(hour=0, minute=0, second=0, microsecond=0):
+                    upcoming_matches.append(match_url)
+                    # Return the first upcoming match found (the next game)
+                    return [match_url]
+            except:
+                # If date parsing fails, check if match page shows it's upcoming
+                # Look for indicators like "TBD", "Upcoming", or no completed stats
+                match_title = get_match_title(match_soup)
+                # If match has no completed stats, it's likely upcoming
+                stats_tables = match_soup.select("table.wf-table-inset, table.wf-table")
+                if not stats_tables or len(stats_tables) == 0:
+                    # No stats = likely upcoming match
+                    return [match_url]
+        except Exception as e:
+            print(f"[DEBUG] Error checking if match {match_url} is upcoming: {e}")
+            continue
+    
+    # If we found upcoming matches, return the first one
+    if upcoming_matches:
+        return [upcoming_matches[0]]
+    
+    # If no upcoming matches found but we have matches, return first one (might be upcoming)
+    if match_urls:
+        return [match_urls[0]]
+    
+    return []
+
 def scrape_agent_stats_by_timespan(player_url: str):
     timespans = ["30d", "60d", "90d", "all"]
     stats_by_timespan = {}
@@ -495,6 +616,203 @@ def get_match_date(soup):
                 return date_text.split()[0] if ' ' in date_text else date_text
     
     return "<Unknown Date>"
+
+def get_match_teams(soup):
+    """Extract team names from a match page"""
+    teams = []
+    team_tags = soup.select("div.match-header-link-name .wf-title-med")
+    if len(team_tags) >= 2:
+        teams = [team_tags[0].text.strip(), team_tags[1].text.strip()]
+    return teams
+
+def find_matches_between_teams(team1, team2, limit=5):
+    """Search VLR for matches between two teams (upcoming or recent)"""
+    # VLR search for matches - try searching by team names
+    # This is a simplified approach - VLR doesn't have a direct API for this
+    # We'll search for upcoming matches and filter by team names
+    
+    # Try searching for upcoming matches page
+    upcoming_url = f"{BASE_URL}/matches"
+    soup = fetch_soup(upcoming_url)
+    if not soup:
+        return []
+    
+    match_links = []
+    # Find match links that contain both team names
+    normalized_team1 = normalize_name(team1)
+    normalized_team2 = normalize_name(team2)
+    
+    # Look for match links
+    links = soup.select("a[href*='/']")
+    for link in links:
+        href = link.get('href', '')
+        if not href:
+            continue
+        
+        # Check if it's a match URL (numeric ID)
+        if href.startswith('/'):
+            path = href.strip('/')
+            parts = path.split('/')
+            if len(parts) > 0 and parts[0].isdigit() and len(parts[0]) >= 4:
+                # Check if match title/link text contains team names
+                link_text = normalize_name(link.text or '')
+                parent_text = normalize_name(link.find_parent().text if link.find_parent() else '')
+                
+                if (normalized_team1 in link_text or normalized_team1 in parent_text or
+                    normalized_team2 in link_text or normalized_team2 in parent_text):
+                    full_url = BASE_URL + href
+                    if full_url not in match_links:
+                        match_links.append(full_url)
+                        if len(match_links) >= limit:
+                            break
+    
+    return match_links
+
+def find_match_urls_for_teams(team_list, max_matches_per_pair=3):
+    """Find VLR match URLs for a list of teams (assumes teams are playing each other)"""
+    match_urls = []
+    match_teams_map = {}  # Map match_url -> [team1, team2]
+    
+    # If we have 2+ teams, try to find matches between them
+    # Group teams into pairs (most common: 2 teams playing each other)
+    if len(team_list) >= 2:
+        # Try all pairs
+        for i in range(len(team_list)):
+            for j in range(i + 1, len(team_list)):
+                team1 = team_list[i]
+                team2 = team_list[j]
+                print(f"[DEBUG] Searching for matches between {team1} and {team2}")
+                matches = find_matches_between_teams(team1, team2, limit=max_matches_per_pair)
+                for match_url in matches:
+                    if match_url not in match_urls:
+                        match_urls.append(match_url)
+                        match_teams_map[match_url] = [team1, team2]
+    
+    return match_urls, match_teams_map
+
+def extract_player_links_from_match(match_url):
+    """Extract all player profile links from a VLR match page"""
+    soup = fetch_soup(match_url)
+    if not soup:
+        return {}
+    
+    player_links = {}
+    teams = get_match_teams(soup)
+    
+    # Find all player links in the match stats tables
+    # VLR match pages have player links in table rows
+    # Try multiple selectors for player rows
+    player_rows = soup.select("table.wf-table-inset tbody tr, table.wf-table tbody tr")
+    
+    for row in player_rows:
+        # Find player link or player cell
+        player_cell = row.select_one("td.mod-player, td[class*='player']")
+        if not player_cell:
+            continue
+        
+        # Try to find link in the cell
+        link = player_cell.select_one("a[href*='/player/']")
+        if not link:
+            continue
+        
+        href = link.get('href', '')
+        if not href or '/player/' not in href:
+            continue
+        
+        # Get player name - try multiple methods
+        player_name = (
+            link.get('title', '') or 
+            link.get('data-title', '') or
+            link.text.strip() or
+            player_cell.get('title', '') or
+            player_cell.text.strip()
+        )
+        
+        # Try to get from text-of div
+        if not player_name:
+            text_of = player_cell.select_one("div.text-of, .text-of")
+            if text_of:
+                player_name = text_of.get('title', '') or text_of.text.strip()
+        
+        if not player_name:
+            continue
+        
+        # Normalize the URL
+        if href.startswith('/player/'):
+            full_url = BASE_URL + href
+        elif href.startswith('http'):
+            full_url = href
+        else:
+            continue
+        
+        # Store with normalized name as key
+        normalized_name = normalize_name(player_name)
+        if normalized_name and normalized_name not in player_links:
+            player_links[normalized_name] = {
+                'url': full_url,
+                'display_name': player_name,
+                'team': None  # Will be determined later
+            }
+    
+    # Try to determine which team each player belongs to
+    # Look at the match stats sections
+    map_sections = soup.select("div.vm-stats-game")
+    if not map_sections:
+        map_sections = soup.select("div[class*='stats-game'], div.match-stats-game")
+    
+    if map_sections and len(teams) >= 2:
+        team1_players = set()
+        team2_players = set()
+        
+        for section in map_sections:
+            # Find team sections (usually two tables or two groups)
+            tables = section.select("table.wf-table-inset, table.wf-table")
+            if len(tables) >= 2:
+                # First table is usually team 1
+                rows1 = tables[0].select("tbody tr")
+                for row in rows1:
+                    player_cell = row.select_one("td.mod-player, td[class*='player']")
+                    if player_cell:
+                        name = player_cell.get("title") or player_cell.text.strip()
+                        if name:
+                            team1_players.add(normalize_name(name))
+                
+                # Second table is usually team 2
+                rows2 = tables[1].select("tbody tr")
+                for row in rows2:
+                    player_cell = row.select_one("td.mod-player, td[class*='player']")
+                    if player_cell:
+                        name = player_cell.get("title") or player_cell.text.strip()
+                        if name:
+                            team2_players.add(normalize_name(name))
+            
+            # Alternative: single table with alternating rows
+            else:
+                rows = section.select("tbody tr")
+                for i, row in enumerate(rows):
+                    player_cell = row.select_one("td.mod-player, td[class*='player']")
+                    if player_cell:
+                        name = player_cell.get("title") or player_cell.text.strip()
+                        if name:
+                            normalized = normalize_name(name)
+                            # First 5 rows usually team 1, next 5 team 2
+                            if i < 5:
+                                team1_players.add(normalized)
+                            else:
+                                team2_players.add(normalized)
+        
+        # Assign teams to player links
+        for normalized_name, player_data in player_links.items():
+            if normalized_name in team1_players:
+                player_data['team'] = teams[0] if teams else None
+            elif normalized_name in team2_players:
+                player_data['team'] = teams[1] if len(teams) > 1 else None
+    
+    return {
+        'players': player_links,
+        'teams': teams,
+        'match_url': match_url
+    }
 
 def parse_match_page(match_url, player_name):
     """Parse a match page to extract player's stats for each map"""

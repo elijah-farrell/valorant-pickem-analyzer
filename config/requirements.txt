@@ -1,5 +1,5 @@
-beautifulsoup4
-requests
 flask
 flask-cors
 flask-limiter
+beautifulsoup4
+requests

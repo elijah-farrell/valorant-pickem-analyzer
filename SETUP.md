@@ -62,9 +62,11 @@ valorant-pickem-analyzer/
 ## Libraries Used
 
 - **[Flask](https://flask.palletsprojects.com/):** Web framework for the backend API
+- **[flask-cors](https://flask-cors.readthedocs.io/):** Cross-Origin Resource Sharing (CORS) support
+- **[flask-limiter](https://flask-limiter.readthedocs.io/):** Rate limiting for API endpoints
 - **[requests](https://docs.python-requests.org/):** Fetching web pages and APIs
 - **[beautifulsoup4](https://www.crummy.com/software/BeautifulSoup/):** HTML parsing for scraping VLR.gg
-- **Python stdlib:** datetime, etc.
+- **Python stdlib:** datetime, os, traceback, urllib.parse, re
 
 ---
 
@@ -80,4 +82,3 @@ VLR.gg may have changed their page structure. Check the Flask console for debug 
 Make sure the player name matches how it appears on VLR.gg (case-insensitive, but spelling must match).
 
 ---
-
