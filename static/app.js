@@ -446,7 +446,12 @@ function displayPlayerStats(data) {
         const matchesToShow = Math.min(10, data.matches.length);
         data.matches.slice(0, matchesToShow).forEach(match => {
             html += '<tr>';
-            html += `<td>${match.match}</td>`;
+            // Make match name a clickable link if match_url is available
+            if (match.match_url) {
+                html += `<td><a href="${match.match_url}" target="_blank" style="color: inherit; text-decoration: underline;">${match.match}</a></td>`;
+            } else {
+                html += `<td>${match.match}</td>`;
+            }
             html += `<td>${match.date}</td>`;
             html += `<td><strong>${match.total_kills}</strong></td>`;
             html += `<td>${match.map_kills.map(m => `${m.map} (${m.kills})`).join(', ')}</td>`;
@@ -494,8 +499,12 @@ function showMoreMatches() {
     const nextBatch = allMatches.slice(currentlyShown, currentlyShown + 10);
     nextBatch.forEach(match => {
         const row = document.createElement('tr');
+        // Make match name a clickable link if match_url is available
+        const matchCell = match.match_url 
+            ? `<td><a href="${match.match_url}" target="_blank" style="color: inherit; text-decoration: underline;">${match.match}</a></td>`
+            : `<td>${match.match}</td>`;
         row.innerHTML = `
-            <td>${match.match}</td>
+            ${matchCell}
             <td>${match.date}</td>
             <td><strong>${match.total_kills}</strong></td>
             <td>${match.map_kills.map(m => `${m.map} (${m.kills})`).join(', ')}</td>
