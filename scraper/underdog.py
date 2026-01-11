@@ -5,7 +5,7 @@ def get_pickem_slate(sport_id="VAL"):
     try:
         response = requests.get(url)
         response.raise_for_status()
-        return response.json().get("over_under_lines", [])
+        return response.json()  # Return full response, not just over_under_lines
     except requests.RequestException:
-        return []
+        return {}
 

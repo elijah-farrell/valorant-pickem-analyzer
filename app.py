@@ -6,6 +6,7 @@ from scraper.underdog import get_pickem_slate
 from scraper.vlr import (
     find_player_url,
     scrape_current_team,
+    scrape_player_name,
     scrape_agent_stats_by_timespan,
     scrape_match_links,
     parse_match_page,
@@ -92,8 +93,8 @@ def get_slate():
         # Optional manual match URL override (rarely needed)
         match_url = request.args.get('match_url', '').strip()
         
-        slate = get_pickem_slate()
-        if not slate:
+        slate_response = get_pickem_slate()
+        if not slate_response or not isinstance(slate_response, dict):
             return jsonify({
                 'players': [],
                 'match_teams': [],
@@ -102,8 +103,100 @@ def get_slate():
                 'message': 'No players found on Underdog. Please check Underdog website for more details.'
             }), 200
 
+        over_under_lines = slate_response.get("over_under_lines", [])
+        appearances = slate_response.get("appearances", [])
+        players_data = slate_response.get("players", [])
+        games = slate_response.get("games", [])
+        
+        # Build maps for team lookup
+        # Map: appearance_id -> (player_id, team_id) from appearances
+        # NOTE: team_id in appearance is the player's team, not the opponent
+        appearance_to_player_team = {}
+        for appearance in appearances:
+            appearance_id = appearance.get("id")
+            player_id = appearance.get("player_id")
+            team_id = appearance.get("team_id")  # This is the player's team
+            if appearance_id and player_id and team_id:
+                appearance_to_player_team[appearance_id] = (player_id, team_id)
+                print(f"[DEBUG] Appearance {appearance_id}: player_id={player_id}, team_id={team_id} (player's team)")
+        
+        # Map: player_id -> team_id
+        player_to_team_id = {}
+        for appearance in appearances:
+            player_id = appearance.get("player_id")
+            team_id = appearance.get("team_id")
+            if player_id and team_id:
+                player_to_team_id[player_id] = team_id
+        
+        # Map: player_id -> player name (last_name)
+        player_id_to_name = {}
+        for player in players_data:
+            player_id = player.get("id")
+            player_name = player.get("last_name", "").strip()
+            if player_id and player_name:
+                player_id_to_name[player_id] = player_name
+        
+        # Map: team_id -> team name (from games)
+        team_id_to_name = {}
+        for game in games:
+            home_team_id = game.get("home_team_id")
+            away_team_id = game.get("away_team_id")
+            
+            # Try full_team_names_title first (most reliable)
+            full_title = game.get("full_team_names_title", "")
+            if " vs " in full_title:
+                parts = full_title.split(" vs ")
+                if len(parts) >= 2:
+                    if home_team_id:
+                        team_id_to_name[home_team_id] = parts[0].strip()
+                    if away_team_id:
+                        team_id_to_name[away_team_id] = parts[1].strip()
+            # Fallback to title
+            elif " vs " in game.get("title", ""):
+                parts = game.get("title", "").split(" vs ")
+                if len(parts) >= 2:
+                    if home_team_id:
+                        team_id_to_name[home_team_id] = parts[0].strip()
+                    if away_team_id:
+                        team_id_to_name[away_team_id] = parts[1].strip()
+            # Fallback to short_title if available
+            elif " vs " in game.get("short_title", ""):
+                parts = game.get("short_title", "").split(" vs ")
+                if len(parts) >= 2:
+                    if home_team_id:
+                        team_id_to_name[home_team_id] = parts[0].strip()
+                    if away_team_id:
+                        team_id_to_name[away_team_id] = parts[1].strip()
+        
+        # Also build team_id_to_name from appearances if we have player_id -> team_id mapping
+        # This ensures we get team names even if game titles don't have them
+        for player_id, team_id in player_to_team_id.items():
+            if team_id and team_id not in team_id_to_name:
+                # Try to find team name from any game this team appears in
+                for game in games:
+                    if game.get("home_team_id") == team_id or game.get("away_team_id") == team_id:
+                        # We already processed this game above, so skip
+                        break
+        
+        print(f"[DEBUG] Mapped {len(team_id_to_name)} team IDs to names: {team_id_to_name}")
+        
+        # Map: player name -> team name
+        player_name_to_team = {}
+        for player_id, team_id in player_to_team_id.items():
+            player_name = player_id_to_name.get(player_id)
+            team_name = team_id_to_name.get(team_id)
+            if player_name and team_name:
+                # Store with normalized key for case-insensitive matching
+                player_name_clean = player_name.strip()
+                player_name_to_team[player_name_clean] = team_name
+                player_name_to_team[player_name_clean.lower()] = team_name  # Also store lowercase for matching
+        
+        print(f"[DEBUG] Mapped {len(player_name_to_team)} players to teams")
+        
+        # Extract player info from over_under_lines
         player_info = []
-        for item in slate:
+        processed_player_names = set()
+        for item in over_under_lines:
             try:
                 # Check if the item has the expected structure
                 if not item.get("over_under") or not item["over_under"].get("title"):
@@ -111,222 +204,134 @@ def get_slate():
                     
                 if "Kills on Maps 1+2 O/U" in item["over_under"]["title"]:
                     player = item["over_under"]["title"].replace(" Kills on Maps 1+2 O/U", "").strip()
+                    processed_player_names.add(player)
                     line = item.get('stat_value')
                     options = item.get("options", [])
                     odds_over = options[0].get("american_price", "N/A") if len(options) >= 1 else "N/A"
                     odds_under = options[1].get("american_price", "N/A") if len(options) >= 2 else "N/A"
+                    
+                    # Get team from appearance_id (this is the player's team, not opponent)
+                    team = None
+                    over_under_obj = item.get("over_under", {})
+                    appearance_stat = over_under_obj.get("appearance_stat", {})
+                    appearance_id = appearance_stat.get("appearance_id")
+                    
+                    if appearance_id and appearance_id in appearance_to_player_team:
+                        player_id, team_id = appearance_to_player_team[appearance_id]
+                        team = team_id_to_name.get(team_id)
+                        
+                        # Verify: find the match for this appearance and check if team_id matches home or away
+                        match_id_for_appearance = None
+                        for appearance in appearances:
+                            if appearance.get("id") == appearance_id:
+                                match_id_for_appearance = appearance.get("match_id")
+                                break
+                        
+                        if match_id_for_appearance:
+                            # Find the game for this match
+                            for game in games:
+                                if game.get("id") == match_id_for_appearance:
+                                    home_team_id = game.get("home_team_id")
+                                    away_team_id = game.get("away_team_id")
+                                    home_team_name = team_id_to_name.get(home_team_id)
+                                    away_team_name = team_id_to_name.get(away_team_id)
+                                    
+                                    if team_id == home_team_id:
+                                        print(f"[DEBUG] Player '{player}': team_id={team_id} matches HOME team '{home_team_name}' (correct)")
+                                    elif team_id == away_team_id:
+                                        print(f"[DEBUG] Player '{player}': team_id={team_id} matches AWAY team '{away_team_name}' (correct)")
+                                    else:
+                                        print(f"[WARNING] Player '{player}': team_id={team_id} doesn't match home={home_team_id} or away={away_team_id}")
+                                    break
+                        
+                        print(f"[DEBUG] Player '{player}': appearance_id={appearance_id}, team_id={team_id}, team_name={team}")
+                    
+                    # Fallback: Get team from player_name_to_team map
+                    if not team:
+                        player_normalized = player.strip()
+                        team = player_name_to_team.get(player_normalized) or player_name_to_team.get(player_normalized.lower())
+                        print(f"[DEBUG] Player '{player}': Using fallback team lookup, found: {team}")
+                    
+                    # Get match_id for this player from appearance
+                    match_id = None
+                    appearance_stat = item.get("over_under", {}).get("appearance_stat", {})
+                    appearance_id = appearance_stat.get("appearance_id")
+                    if appearance_id:
+                        for appearance in appearances:
+                            if appearance.get("id") == appearance_id:
+                                match_id = appearance.get("match_id")
+                                break
+                    
                     player_info.append({
                         'player': player,
                         'line': line,
                         'odds_over': odds_over,
-                        'odds_under': odds_under
+                        'odds_under': odds_under,
+                        'team': team,  # Team from Underdog API
+                        'match_id': match_id  # Store match_id for organization
                     })
             except Exception as e:
                 print(f"Error parsing slate item: {e}")
                 continue
+        
+        print(f"[DEBUG] Processed {len(player_info)} players from {len(over_under_lines)} over_under_lines")
+        print(f"[DEBUG] Player names processed: {sorted(processed_player_names)}")
 
-        # Step 1: Get teams for ALL players to identify which teams are playing
-        # Step 2: Find next match for each team (the next game they play)
-        # Step 3: Extract all player links from those matches
-        # Step 4: Process all players using those links
-        
-        player_link_map = {}
+        # Organize players by match using match_id from appearances (all from Underdog API - no VLR scraping!)
         match_teams = []
-        all_matches_info = []  # Store all matches with their teams: [{url, teams: [team1, team2]}, ...]
-        match_urls_found = []  # Store all match URLs we found
-        use_match_link = False  # Flag: True = use player links from match pages, False = fall back to name search
+        all_matches_info = []
         
-        # If we have a manually provided match URL, use it first
-        if match_url:
-            try:
-                print(f"[DEBUG] Using provided match URL: {match_url}")
-                match_data = extract_player_links_from_match(match_url)
-                extracted_players = match_data.get('players', {})
-                for key, value in extracted_players.items():
-                    player_link_map[key] = value
-                match_teams = match_data.get('teams', [])
-                match_urls_found.append(match_url)
-                use_match_link = True
-            except Exception as e:
-                print(f"[DEBUG] Failed to extract from provided match URL: {e}")
-        
-        # Step 1: Get teams for ALL players to identify which teams are playing
-        if not use_match_link and len(player_info) > 0:
-            print(f"[DEBUG] Step 1: Getting teams for ALL {len(player_info)} players")
-            teams_to_players = {}  # Map team -> list of players
-            teams_checked = set()
+        if len(player_info) > 0 and len(games) > 0:
+            print(f"[DEBUG] Organizing {len(player_info)} players by matches from Underdog API (no VLR scraping needed)")
             
-            # Get teams for ALL players
-            for player_data in player_info:
-                try:
-                    player = player_data['player']
-                    print(f"[DEBUG] Getting team for: {player}")
-                    
-                    # Find player URL
-                    player_url = find_player_url(player)
-                    if not player_url:
-                        continue
-                    
-                    # Get team name and URL from player page
-                    soup = fetch_soup(player_url)
-                    if not soup:
-                        continue
-                    
-                    team_name = scrape_current_team(soup)
-                    if not team_name:
-                        continue
-                    
-                    # Get team URL
-                    team_url = get_team_url_from_player(player_url)
-                    if not team_url:
-                        continue
-                    
-                    # Group players by team
-                    if team_name not in teams_to_players:
-                        teams_to_players[team_name] = {
-                            'players': [],
-                            'team_url': team_url
-                        }
-                    teams_to_players[team_name]['players'].append(player)
-                    
-                except Exception as e:
-                    print(f"[DEBUG] Error getting team for {player_data.get('player', 'unknown')}: {e}")
-                    continue
+            # Map: match_id -> game info
+            match_id_to_game = {}
+            for game in games:
+                match_id = game.get("id")
+                if match_id:
+                    match_id_to_game[match_id] = game
             
-            print(f"[DEBUG] Found {len(teams_to_players)} teams: {list(teams_to_players.keys())}")
+            # Organize by matches - create match info from games
+            for game in games:
+                match_id = game.get("id")
+                home_team_id = game.get("home_team_id")
+                away_team_id = game.get("away_team_id")
+                home_team_name = team_id_to_name.get(home_team_id)
+                away_team_name = team_id_to_name.get(away_team_id)
+                
+                if match_id and home_team_name and away_team_name:
+                    match_key = f"{home_team_name} vs {away_team_name}"
+                    all_matches_info.append({
+                        'url': None,  # No VLR URL needed - all from Underdog API
+                        'teams': [home_team_name, away_team_name],
+                        'match_key': match_key,
+                        'match_id': match_id
+                    })
+                    
+                    # Set primary match teams if not set
+                    if not match_teams:
+                        match_teams = [home_team_name, away_team_name]
             
-            # Step 2: Find next match for each team
-            if len(teams_to_players) > 0:
-                print(f"[DEBUG] Step 2: Finding next match for {len(teams_to_players)} teams")
-                all_match_urls = []
-                match_teams_map = {}  # Map match_url -> [team1, team2]
-                
-                for team_name, team_data in teams_to_players.items():
-                    team_url = team_data['team_url']
-                    if team_url in teams_checked:
-                        continue
-                    teams_checked.add(team_url)
-                    
-                    print(f"[DEBUG] Getting next match for {team_name} ({team_url})")
-                    next_matches = get_match_from_team(team_url)
-                    print(f"[DEBUG] Found {len(next_matches)} match(es) - using first one")
-                    
-                    # Only get the first/next match per team
-                    for match_url_found in next_matches[:1]:  # Only get the next match
-                        if match_url_found not in all_match_urls:
-                            all_match_urls.append(match_url_found)
-                            # Get teams from match to map them
-                            try:
-                                match_data = extract_player_links_from_match(match_url_found)
-                                match_teams_from_match = match_data.get('teams', [])
-                                if len(match_teams_from_match) >= 2:
-                                    match_teams_map[match_url_found] = match_teams_from_match[:2]
-                            except:
-                                pass
-                
-                print(f"[DEBUG] Found {len(all_match_urls)} total upcoming matches")
-                
-                # Step 3: Extract player links from all found matches
-                print(f"[DEBUG] Step 3: Extracting player links from matches")
-                for match_url_found in all_match_urls[:10]:  # Limit to 10 matches total
-                    try:
-                        match_data = extract_player_links_from_match(match_url_found)
-                        extracted_players = match_data.get('players', {})
-                        
-                        # Check if this match has any of our players
-                        has_our_players = False
-                        for p_data in player_info:
-                            normalized_player = normalize_name(p_data['player'])
-                            if normalized_player in extracted_players:
-                                has_our_players = True
-                                break
-                            # Also check display names
-                            for key, link_data in extracted_players.items():
-                                display_name = normalize_name(link_data.get('display_name', ''))
-                                if normalized_player in display_name or display_name in normalized_player:
-                                    has_our_players = True
-                                    break
-                            if has_our_players:
-                                break
-                        
-                        if has_our_players:
-                            print(f"[DEBUG] Found relevant match: {match_url_found}")
-                            match_urls_found.append(match_url_found)
-                            
-                            # Merge into player_link_map
-                            for key, value in extracted_players.items():
-                                if key not in player_link_map:
-                                    player_link_map[key] = value
-                            
-                            # Get teams from this match and store match info
-                            match_teams_from_match = match_data.get('teams', [])
-                            if match_teams_from_match:
-                                all_matches_info.append({
-                                    'url': match_url_found,
-                                    'teams': match_teams_from_match[:2]
-                                })
-                                # Use first match's teams as primary (for backward compatibility)
-                                if not match_teams:
-                                    match_teams = match_teams_from_match[:2]
-                            
-                            use_match_link = True
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to extract from match {match_url_found}: {e}")
-                        # Even if we can't extract player links, if we have team info from earlier, use it for organization
-                        if match_url_found in match_teams_map:
-                            teams_from_map = match_teams_map[match_url_found]
-                            if len(teams_from_map) >= 2:
-                                all_matches_info.append({
-                                    'url': match_url_found,
-                                    'teams': teams_from_map[:2]
-                                })
-                                if not match_teams:
-                                    match_teams = teams_from_map[:2]
-                        continue
-        
-        print(f"[DEBUG] Step 4: Found {len(player_link_map)} players via {len(match_urls_found)} matches")
-        if not player_link_map:
-            print("[DEBUG] No matches found, will use name search fallback")
-            use_match_link = False
+            print(f"[DEBUG] Organized into {len(all_matches_info)} matches from Underdog API")
 
         # Fetch VLR stats for each player
         results = []
         for player_data in player_info:
             player = player_data['player']
             line = player_data['line']
+            # Use team from Underdog API (never guess/scrape from VLR)
+            team_from_underdog = player_data.get('team')
             
             try:
-                # Try to find player URL using match link method first
-                url = None
-                team = None
-                normalized_player = normalize_name(player)
-                
-                if use_match_link and player_link_map:
-                    # Try exact match first
-                    if normalized_player in player_link_map:
-                        url = player_link_map[normalized_player]['url']
-                        team = player_link_map[normalized_player].get('team')
-                        print(f"[DEBUG] Found {player} via match link: {url}")
-                    else:
-                        # Try partial match (player name might be in the display name)
-                        for normalized_key, link_data in player_link_map.items():
-                            display_name = normalize_name(link_data.get('display_name', ''))
-                            if normalized_player in display_name or display_name in normalized_player:
-                                url = link_data['url']
-                                team = link_data.get('team')
-                                print(f"[DEBUG] Found {player} via partial match: {url}")
-                                break
-                
-                # Fall back to name search if match link method didn't work
+                # Always search for player URL directly using name search
+                url = find_player_url(player)
                 if not url:
-                    url = find_player_url(player)
-                    if not url:
-                        results.append({
+                    results.append({
                         'player': player,
                         'line': line,
                         'odds_over': player_data['odds_over'],
                         'odds_under': player_data['odds_under'],
-                        'team': None,
+                        'team': team_from_underdog,  # Use team from Underdog API
                         'team_url': None,
                         'vlr_url': None,
                         'avg_last_5': None,
@@ -338,7 +343,7 @@ def get_slate():
 
                 soup = fetch_soup(url)
                 if not soup:
-                    # Get team URL if we have player URL
+                    # Get team URL if we have player URL (for linking, but use Underdog team name)
                     team_url = None
                     if url:
                         try:
@@ -351,7 +356,7 @@ def get_slate():
                         'line': line,
                         'odds_over': player_data['odds_over'],
                         'odds_under': player_data['odds_under'],
-                        'team': team,  # Use team from match if available
+                        'team': team_from_underdog,  # Use team from Underdog API
                         'team_url': team_url,
                         'vlr_url': url,
                         'avg_last_5': None,
@@ -361,27 +366,22 @@ def get_slate():
                     })
                     continue
 
-                # Only scrape team if we didn't get it from match link
-                if not team:
-                    team = scrape_current_team(soup)
+                # Get team URL for linking (but always use team name from Underdog)
+                team_url = None
+                try:
+                    team_url = get_team_url_from_player(url)
+                except:
+                    pass
 
                 # Scrape match data
                 links = scrape_match_links(url)
                 if not links:
-                    # Get team URL if we have player URL
-                    team_url = None
-                    if url:
-                        try:
-                            team_url = get_team_url_from_player(url)
-                        except:
-                            pass
-                    
                     results.append({
                         'player': player,
                         'line': line,
                         'odds_over': player_data['odds_over'],
                         'odds_under': player_data['odds_under'],
-                        'team': team,
+                        'team': team_from_underdog,  # Use team from Underdog API
                         'team_url': team_url,
                         'vlr_url': url,
                         'avg_last_5': None,
@@ -402,20 +402,12 @@ def get_slate():
 
                 good_matches = group_kills_by_match(all_maps, player, max_maps=2)
                 if not good_matches:
-                    # Get team URL if we have player URL
-                    team_url = None
-                    if url:
-                        try:
-                            team_url = get_team_url_from_player(url)
-                        except:
-                            pass
-                    
                     results.append({
                         'player': player,
                         'line': line,
                         'odds_over': player_data['odds_over'],
                         'odds_under': player_data['odds_under'],
-                        'team': team,
+                        'team': team_from_underdog,  # Use team from Underdog API
                         'team_url': team_url,
                         'vlr_url': url,
                         'avg_last_5': None,
@@ -440,13 +432,14 @@ def get_slate():
                     'line': line,
                     'odds_over': player_data['odds_over'],
                     'odds_under': player_data['odds_under'],
-                    'team': team,
+                    'team': team_from_underdog,  # Use team from Underdog API
                     'team_url': team_url,
                     'vlr_url': url,
                     'avg_last_5': avgs[5],
                     'avg_last_10': avgs[10],
                     'avg_last_25': avgs[25],
-                    'matches_analyzed': len(good_matches)
+                    'matches_analyzed': len(good_matches),
+                    'match_id': player_data.get('match_id')  # Store match_id for organization
                 })
             except Exception as e:
                 error_details = traceback.format_exc()
@@ -467,7 +460,7 @@ def get_slate():
                     'line': line,
                     'odds_over': player_data['odds_over'],
                     'odds_under': player_data['odds_under'],
-                    'team': None,
+                    'team': team_from_underdog,  # Use team from Underdog API
                     'team_url': None,
                     'vlr_url': None,
                     'avg_last_5': None,
@@ -476,153 +469,169 @@ def get_slate():
                     'error': error_msg
                 })
 
-        # Organize players by match for better frontend display
-        # Group players by their teams to identify which matches they're in
+        # Organize players by match using match_id from results (all from Underdog API - no VLR scraping!)
         players_by_match = {}  # Map match_key -> {teams: [team1, team2], players: []}
         
-        # Group all players by team first
-        players_by_team = {}
-        for player_result in results:
-            team = player_result.get('team', 'Other')
-            if team not in players_by_team:
-                players_by_team[team] = []
-            players_by_team[team].append(player_result)
-        
-        # If we have match info, organize players by match
         if len(all_matches_info) > 0:
-            print(f"[DEBUG] Organizing {len(results)} players into {len(all_matches_info)} matches")
-            print(f"[DEBUG] Teams found: {list(players_by_team.keys())}")
+            print(f"[DEBUG] Organizing {len(results)} players into {len(all_matches_info)} matches using Underdog API data")
             
-            # Track which players are already assigned to avoid duplicates across all matches
-            all_assigned_player_names = set()
-            
-            # For each match, assign players to that match
+            # Map: match_id -> match_info for quick lookup
+            match_id_to_match_info = {}
             for match_info in all_matches_info:
-                match_teams_list = match_info['teams']
-                if len(match_teams_list) >= 2:
-                    team1 = match_teams_list[0]
-                    team2 = match_teams_list[1]
-                    match_key = f"{team1} vs {team2}"
+                match_id = match_info.get('match_id')
+                if match_id:
+                    match_id_to_match_info[match_id] = match_info
+            
+            # Group results by match_id
+            match_id_to_results = {}
+            for player_result in results:
+                match_id = player_result.get('match_id')
+                if match_id:
+                    if match_id not in match_id_to_results:
+                        match_id_to_results[match_id] = []
+                    match_id_to_results[match_id].append(player_result)
+            
+            # For each match, organize players by team
+            for match_info in all_matches_info:
+                match_id = match_info.get('match_id')
+                match_key = match_info.get('match_key')
+                teams = match_info.get('teams', [])
+                
+                if not match_key or len(teams) < 2:
+                    continue
+                
+                team1 = teams[0]
+                team2 = teams[1]
+                
+                if match_key not in players_by_match:
+                    players_by_match[match_key] = {
+                        'teams': [team1, team2],
+                        'players': []
+                    }
+                
+                # Get players for this match_id
+                match_players = match_id_to_results.get(match_id, [])
+                
+                # Sort players by team: team1 players first, then team2 players
+                team1_players = []
+                team2_players = []
+                
+                for player_result in match_players:
+                    player_team = player_result.get('team', '')
+                    if not player_team:
+                        # Try to get team from player_id if team is missing
+                        player_name = player_result.get('player', '').strip()
+                        if player_name:
+                            # Look up player_id from name
+                            player_id = None
+                            for pid, pname in player_id_to_name.items():
+                                if pname.strip() == player_name:
+                                    player_id = pid
+                                    break
+                            
+                            if player_id and player_id in player_to_team_id:
+                                team_id = player_to_team_id[player_id]
+                                player_team = team_id_to_name.get(team_id, '')
+                                player_result['team'] = player_team  # Update the result
                     
-                    print(f"[DEBUG] Processing match: {match_key}")
+                    normalized_player_team = normalize_name(player_team) if player_team else ''
+                    normalized_team1 = normalize_name(team1)
+                    normalized_team2 = normalize_name(team2)
                     
-                    if match_key not in players_by_match:
-                        players_by_match[match_key] = {
-                            'teams': [team1, team2],
-                            'players': []
-                        }
+                    # More robust team matching
+                    team_matched = False
+                    if normalized_player_team:
+                        if (normalized_player_team == normalized_team1 or 
+                            normalized_team1 == normalized_player_team or
+                            (normalized_team1 and normalized_team1 in normalized_player_team) or
+                            (normalized_player_team and normalized_player_team in normalized_team1)):
+                            team1_players.append(player_result)
+                            team_matched = True
+                        elif (normalized_player_team == normalized_team2 or 
+                              normalized_team2 == normalized_player_team or
+                              (normalized_team2 and normalized_team2 in normalized_player_team) or
+                              (normalized_player_team and normalized_player_team in normalized_team2)):
+                            team2_players.append(player_result)
+                            team_matched = True
                     
-                    # Add players from both teams to this match
-                    for team, players in players_by_team.items():
-                        normalized_team = normalize_name(team)
-                        normalized_team1 = normalize_name(team1)
-                        normalized_team2 = normalize_name(team2)
-                        
-                        # More robust matching - check exact match first, then partial
-                        team_matches = (
-                            normalized_team == normalized_team1 or 
-                            normalized_team == normalized_team2
-                        )
-                        
-                        # Also check if team names contain each other (for variations like "MAYHEM" vs "Mayhem")
-                        if not team_matches:
-                            team_matches = (
-                                normalized_team1 in normalized_team or
-                                normalized_team in normalized_team1 or
-                                normalized_team2 in normalized_team or
-                                normalized_team in normalized_team2
-                            )
-                        
-                        if team_matches:
-                            print(f"[DEBUG] Matched team '{team}' to match '{match_key}'")
-                            # Only add players that haven't been added to any match yet
-                            for player in players:
-                                player_name = player.get('player', '')
-                                if player_name and player_name not in all_assigned_player_names:
-                                    players_by_match[match_key]['players'].append(player)
-                                    all_assigned_player_names.add(player_name)
+                    if not team_matched:
+                        # If can't determine, try to match by checking the actual game teams
+                        # Get the game for this match
+                        game = match_id_to_game.get(match_id)
+                        if game:
+                            home_team_id = game.get("home_team_id")
+                            away_team_id = game.get("away_team_id")
+                            
+                            # Try to get player's team_id from player_id
+                            player_name = player_result.get('player', '').strip()
+                            player_id = None
+                            for pid, pname in player_id_to_name.items():
+                                if pname.strip() == player_name:
+                                    player_id = pid
+                                    break
+                            
+                            if player_id and player_id in player_to_team_id:
+                                player_team_id = player_to_team_id[player_id]
+                                if player_team_id == home_team_id:
+                                    team1_players.append(player_result)
+                                elif player_team_id == away_team_id:
+                                    team2_players.append(player_result)
+                                else:
+                                    # Default to team1 if still can't determine
+                                    team1_players.append(player_result)
+                            else:
+                                # Default to team1 if can't determine
+                                team1_players.append(player_result)
                         else:
-                            print(f"[DEBUG] Team '{team}' (normalized: '{normalized_team}') did not match '{normalized_team1}' or '{normalized_team2}'")
+                            # Default to team1 if no game info
+                            team1_players.append(player_result)
+                
+                # Add team1 players first, then team2 players
+                players_by_match[match_key]['players'].extend(team1_players)
+                players_by_match[match_key]['players'].extend(team2_players)
+                
+                print(f"[DEBUG] Match '{match_key}': {len(team1_players)} team1 players, {len(team2_players)} team2 players")
             
             # Add any remaining players (not in any match) to "Other"
-            # Use player names as identifiers since dicts aren't hashable
             all_assigned_player_names = set()
             for match_data in players_by_match.values():
                 for player in match_data['players']:
-                    player_name = player.get('player', '')
+                    player_name = player.get('player', '').strip()
                     if player_name:
                         all_assigned_player_names.add(player_name)
             
-            for team, players in players_by_team.items():
-                for player in players:
-                    player_name = player.get('player', '')
-                    if player_name and player_name not in all_assigned_player_names:
-                        if 'Other' not in players_by_match:
-                            players_by_match['Other'] = {
-                                'teams': [],
-                                'players': []
-                            }
-                        players_by_match['Other']['players'].append(player)
-                        all_assigned_player_names.add(player_name)  # Mark as assigned
-        elif len(match_teams) >= 2:
-            # Fallback: use single match teams if we have them
-            team1 = match_teams[0]
-            team2 = match_teams[1]
-            match_key = f"{team1} vs {team2}"
-            
-            players_by_match[match_key] = {
-                'teams': [team1, team2],
-                'players': []
-            }
-            
-            # Add players from both teams to this match
-            # Track which players are already assigned to avoid duplicates
-            assigned_player_names = set()
-            for existing_match_data in players_by_match.values():
-                for existing_player in existing_match_data['players']:
-                    assigned_player_names.add(existing_player.get('player', ''))
-            
-            for team, players in players_by_team.items():
-                normalized_team = normalize_name(team)
-                normalized_team1 = normalize_name(team1)
-                normalized_team2 = normalize_name(team2)
-                
-                if (normalized_team == normalized_team1 or 
-                    normalized_team == normalized_team2 or
-                    normalized_team1 in normalized_team or
-                    normalized_team in normalized_team1 or
-                    normalized_team2 in normalized_team or
-                    normalized_team in normalized_team2):
-                    # Only add players not already assigned
-                    for player in players:
-                        player_name = player.get('player', '')
-                        if player_name and player_name not in assigned_player_names:
-                            players_by_match[match_key]['players'].append(player)
-                            assigned_player_names.add(player_name)
-                else:
-                    # Player not in this match, add to "Other" category if not already assigned
+            for player_result in results:
+                player_name = player_result.get('player', '').strip()
+                if player_name and player_name not in all_assigned_player_names:
                     if 'Other' not in players_by_match:
                         players_by_match['Other'] = {
                             'teams': [],
                             'players': []
                         }
-                    for player in players:
-                        player_name = player.get('player', '')
-                        if player_name and player_name not in assigned_player_names:
-                            players_by_match['Other']['players'].append(player)
-                            assigned_player_names.add(player_name)
+                    players_by_match['Other']['players'].append(player_result)
+                    all_assigned_player_names.add(player_name)
         else:
-            # No match info, just group by team
-            for team, players in players_by_team.items():
-                players_by_match[team] = {
-                    'teams': [team],
-                    'players': players
+            # No match info - add all players to a single group
+            if results:
+                players_by_match['All Players'] = {
+                    'teams': [],
+                    'players': results
                 }
+        
+        # Debug: Print team assignments for verification
+        print(f"[DEBUG] Final team assignments for {len(results)} players:")
+        for player_result in results[:10]:  # Print first 10 for debugging
+            player_name = player_result.get('player', '')
+            team = player_result.get('team', 'N/A')
+            match_id = player_result.get('match_id', 'N/A')
+            print(f"  {player_name}: team={team}, match_id={match_id}")
+        if len(results) > 10:
+            print(f"  ... and {len(results) - 10} more players")
         
         return jsonify({
             'players': results,
             'match_teams': match_teams,
-            'match_url': match_url if use_match_link and match_url else None,
+            'match_url': match_url if match_url else None,
             'players_by_match': players_by_match
         })
     except Exception as e:
@@ -644,6 +653,11 @@ def get_player_stats(player_name):
         if not soup:
             return jsonify({'error': 'Failed to fetch player page from VLR.gg'}), 500
 
+        # Get the actual player display name from VLR
+        actual_player_name = scrape_player_name(soup)
+        if not actual_player_name:
+            actual_player_name = player_name  # Fallback to search term if can't find name
+        
         team = scrape_current_team(soup)
         
         # Get team URL from player profile
@@ -665,7 +679,7 @@ def get_player_stats(player_name):
         print(f"[DEBUG] Found {len(links)} match links for {player_name}")
         if not links:
             return jsonify({
-                'player': player_name,
+                'player': actual_player_name,
                 'team': team,
                 'team_url': team_url,
                 'vlr_url': url,
@@ -697,7 +711,7 @@ def get_player_stats(player_name):
         print(f"[DEBUG] Averages: {avgs}")
 
         return jsonify({
-            'player': player_name,
+            'player': actual_player_name,
             'team': team,
             'team_url': team_url,
             'vlr_url': url,

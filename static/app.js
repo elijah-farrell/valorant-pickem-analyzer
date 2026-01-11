@@ -392,9 +392,9 @@ function displayPlayerStats(data) {
     html += '<div class="player-header">';
     // Make player name a link to their VLR profile
     if (data.vlr_url) {
-        html += `<h2><a href="${data.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${data.player}</a></h2>`;
+        html += `<h2><a href="${data.vlr_url}" target="_blank" style="color: inherit; text-decoration: none; font-weight: bold;">${data.player}</a></h2>`;
     } else {
-        html += `<h2>${data.player}</h2>`;
+        html += `<h2 style="font-weight: bold;">${data.player}</h2>`;
     }
     html += `<div>`;
     if (data.team) {

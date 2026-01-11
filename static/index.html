@@ -8,23 +8,25 @@
     <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-    <div class="container">
-        <header>
+    <section class="hero">
+        <div class="grid-background-wrapper">
+            <div class="grid-pattern-overlay"></div>
+        </div>
+        <div class="hero-content">
             <h1>Valorant Pick'em Analyzer</h1>
             <p>Compare Underdog lines with VLR.gg stats</p>
-        </header>
-
-        <div class="controls">
-            <button id="loadSlate" class="btn-primary">Load Underdog Slate</button>
-            <div class="search-box">
+            
+            <div class="hero-controls">
+                <button id="loadSlate" class="btn-primary">Load Underdog Slate</button>
                 <input type="text" id="playerSearch" placeholder="Search player stats...">
                 <button id="searchPlayer" class="btn-secondary">Search</button>
             </div>
         </div>
+    </section>
 
+    <div class="container">
         <div id="loading" class="loading hidden">Loading...</div>
         <div id="error" class="error hidden"></div>
-
         <div id="results"></div>
     </div>
 

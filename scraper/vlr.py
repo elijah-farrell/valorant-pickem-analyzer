@@ -94,6 +94,35 @@ def find_player_url(player_name: str):
 
     return None
 
+def scrape_player_name(soup: BeautifulSoup):
+    """Extract the actual player display name from VLR player profile page"""
+    # Try multiple selectors for player name on profile page
+    name_selectors = [
+        "h1.wf-title",
+        "h1",
+        ".player-header h1",
+        "div.player-header h1",
+        "h1.player-name",
+    ]
+    
+    for selector in name_selectors:
+        name_elem = soup.select_one(selector)
+        if name_elem:
+            name = name_elem.get_text(strip=True)
+            if name:
+                return name
+    
+    # Fallback: try to find in page title or meta
+    title_tag = soup.find("title")
+    if title_tag:
+        title_text = title_tag.get_text(strip=True)
+        # VLR titles often have format "Player Name - VLR.gg"
+        if " - " in title_text:
+            return title_text.split(" - ")[0].strip()
+        return title_text
+    
+    return None
+
 def scrape_current_team(soup: BeautifulSoup):
     team_header = soup.find("h2", string=lambda s: s and "Current Teams" in s)
     if not team_header:
