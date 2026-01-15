@@ -151,11 +151,11 @@ function displaySlate(data) {
                     } else {
                         html += `<td><strong>${player.player}</strong></td>`;
                     }
-                    // Team name as link
+                    // Team name as link - always use player.team from API
                     if (player.team_url) {
-                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || team1}</a></td>`;
+                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
                     } else {
-                        html += `<td>${player.team || team1}</td>`;
+                        html += `<td>${player.team || 'N/A'}</td>`;
                     }
                     html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                     html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -180,11 +180,11 @@ function displaySlate(data) {
                     } else {
                         html += `<td><strong>${player.player}</strong></td>`;
                     }
-                    // Team name as link
+                    // Team name as link - always use player.team from API
                     if (player.team_url) {
-                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || team2}</a></td>`;
+                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
                     } else {
-                        html += `<td>${player.team || team2}</td>`;
+                        html += `<td>${player.team || 'N/A'}</td>`;
                     }
                     html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                     html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -221,11 +221,11 @@ function displaySlate(data) {
                         } else {
                             html += `<td><strong>${player.player}</strong></td>`;
                         }
-                        // Team name as link
+                        // Team name as link - always use player.team from API
                         if (player.team_url) {
-                            html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || team}</a></td>`;
+                            html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
                         } else {
-                            html += `<td>${player.team || team}</td>`;
+                            html += `<td>${player.team || 'N/A'}</td>`;
                         }
                         html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                         html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -273,11 +273,11 @@ function displaySlate(data) {
                 } else {
                     html += `<td><strong>${player.player}</strong></td>`;
                 }
-                // Team name as link
+                // Team name as link - always use player.team from API
                 if (player.team_url) {
-                    html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${team}</a></td>`;
+                    html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
                 } else {
-                    html += `<td>${team}</td>`;
+                    html += `<td>${player.team || 'N/A'}</td>`;
                 }
                 html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                 html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;

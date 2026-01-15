@@ -16,7 +16,7 @@ Instructions for running the Valorant Pick'em Analyzer locally.
 1. **Install dependencies**
 
    ```powershell
-   pip install -r config/requirements.txt
+   pip install -r requirements.txt
    ```
 
 2. **Run the Flask server**
@@ -38,6 +38,7 @@ valorant-pickem-analyzer/
 ├── app.py                 # Flask backend server
 ├── README.md
 ├── SETUP.md              # This file
+├── requirements.txt  # Python dependencies
 ├── static/
 │   ├── index.html        # Frontend HTML
 │   ├── styles.css        # Modern CSS styling
@@ -45,9 +46,6 @@ valorant-pickem-analyzer/
 ├── scraper/
 │   ├── vlr.py           # VLR.gg scraping functions
 │   └── underdog.py       # Underdog Fantasy API client
-└── config/
-    ├── requirements.txt  # Python dependencies
-    └── valorant.ico     # Site favicon
 ```
 
 ---

@@ -128,13 +128,17 @@ def get_slate():
             if player_id and team_id:
                 player_to_team_id[player_id] = team_id
         
-        # Map: player_id -> player name (last_name)
+        # Map: player_id -> player name (last_name) and player_id -> team_id
         player_id_to_name = {}
+        player_id_to_team_id_direct = {}  # Direct from players array - most reliable!
         for player in players_data:
             player_id = player.get("id")
             player_name = player.get("last_name", "").strip()
+            team_id = player.get("team_id")
             if player_id and player_name:
                 player_id_to_name[player_id] = player_name
+            if player_id and team_id:
+                player_id_to_team_id_direct[player_id] = team_id
         
         # Map: team_id -> team name (from games)
         team_id_to_name = {}
@@ -210,45 +214,25 @@ def get_slate():
                     odds_over = options[0].get("american_price", "N/A") if len(options) >= 1 else "N/A"
                     odds_under = options[1].get("american_price", "N/A") if len(options) >= 2 else "N/A"
                     
-                    # Get team from appearance_id (this is the player's team, not opponent)
+                    # Get team directly from players array using player name -> player_id -> team_id
                     team = None
-                    over_under_obj = item.get("over_under", {})
-                    appearance_stat = over_under_obj.get("appearance_stat", {})
-                    appearance_id = appearance_stat.get("appearance_id")
+                    player_normalized = player.strip()
                     
-                    if appearance_id and appearance_id in appearance_to_player_team:
-                        player_id, team_id = appearance_to_player_team[appearance_id]
+                    # Find player_id from name
+                    player_id = None
+                    for pid, pname in player_id_to_name.items():
+                        if pname.strip() == player_normalized or pname.strip().lower() == player_normalized.lower():
+                            player_id = pid
+                            break
+                    
+                    # Get team_id directly from players array (most reliable!)
+                    if player_id and player_id in player_id_to_team_id_direct:
+                        team_id = player_id_to_team_id_direct[player_id]
                         team = team_id_to_name.get(team_id)
-                        
-                        # Verify: find the match for this appearance and check if team_id matches home or away
-                        match_id_for_appearance = None
-                        for appearance in appearances:
-                            if appearance.get("id") == appearance_id:
-                                match_id_for_appearance = appearance.get("match_id")
-                                break
-                        
-                        if match_id_for_appearance:
-                            # Find the game for this match
-                            for game in games:
-                                if game.get("id") == match_id_for_appearance:
-                                    home_team_id = game.get("home_team_id")
-                                    away_team_id = game.get("away_team_id")
-                                    home_team_name = team_id_to_name.get(home_team_id)
-                                    away_team_name = team_id_to_name.get(away_team_id)
-                                    
-                                    if team_id == home_team_id:
-                                        print(f"[DEBUG] Player '{player}': team_id={team_id} matches HOME team '{home_team_name}' (correct)")
-                                    elif team_id == away_team_id:
-                                        print(f"[DEBUG] Player '{player}': team_id={team_id} matches AWAY team '{away_team_name}' (correct)")
-                                    else:
-                                        print(f"[WARNING] Player '{player}': team_id={team_id} doesn't match home={home_team_id} or away={away_team_id}")
-                                    break
-                        
-                        print(f"[DEBUG] Player '{player}': appearance_id={appearance_id}, team_id={team_id}, team_name={team}")
+                        print(f"[DEBUG] Player '{player}': player_id={player_id}, team_id={team_id}, team_name={team} (from players array)")
                     
                     # Fallback: Get team from player_name_to_team map
                     if not team:
-                        player_normalized = player.strip()
                         team = player_name_to_team.get(player_normalized) or player_name_to_team.get(player_normalized.lower())
                         print(f"[DEBUG] Player '{player}': Using fallback team lookup, found: {team}")
                     
@@ -331,7 +315,7 @@ def get_slate():
                         'line': line,
                         'odds_over': player_data['odds_over'],
                         'odds_under': player_data['odds_under'],
-                        'team': team_from_underdog,  # Use team from Underdog API
+                        'team': team_from_underdog,  # Use Underdog team as fallback when VLR not available
                         'team_url': None,
                         'vlr_url': None,
                         'avg_last_5': None,
@@ -343,7 +327,7 @@ def get_slate():
 
                 soup = fetch_soup(url)
                 if not soup:
-                    # Get team URL if we have player URL (for linking, but use Underdog team name)
+                    # Get team URL for linking (but always use team name from Underdog API)
                     team_url = None
                     if url:
                         try:
@@ -366,7 +350,7 @@ def get_slate():
                     })
                     continue
 
-                # Get team URL for linking (but always use team name from Underdog)
+                # Get team URL for linking (but always use team name from Underdog API)
                 team_url = None
                 try:
                     team_url = get_team_url_from_player(url)
@@ -420,8 +404,7 @@ def get_slate():
                 avgs = compute_averages(good_matches)
                 
                 # Get team URL if we have player URL
-                team_url = None
-                if url:
+                if not team_url:
                     try:
                         team_url = get_team_url_from_player(url)
                     except:
@@ -460,7 +443,7 @@ def get_slate():
                     'line': line,
                     'odds_over': player_data['odds_over'],
                     'odds_under': player_data['odds_under'],
-                    'team': team_from_underdog,  # Use team from Underdog API
+                    'team': team_from_underdog,  # Use Underdog team as fallback when VLR not available
                     'team_url': None,
                     'vlr_url': None,
                     'avg_last_5': None,
