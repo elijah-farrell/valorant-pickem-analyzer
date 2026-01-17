@@ -1,16 +1,9 @@
-import requests
 from datetime import datetime
+
+import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.vlr.gg"
-
-# Playwright for JavaScript rendering (optional, only if needed)
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    print("[WARN] Playwright not installed. JavaScript-rendered pages won't work.")
 
 def normalize_name(name: str) -> str:
     """Normalize player name for comparison - more flexible matching"""
@@ -28,28 +21,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 }
 
-def fetch_soup(url: str, use_playwright=False):
-    """Fetch HTML and parse with BeautifulSoup. Optionally use Playwright for JS rendering."""
-    if use_playwright and PLAYWRIGHT_AVAILABLE:
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                # Wait a bit for dynamic content to load
-                page.wait_for_timeout(2000)
-                html = page.content()
-                browser.close()
-                return BeautifulSoup(html, "html.parser")
-        except Exception as e:
-            print(f"[DEBUG] Playwright failed, falling back to requests: {e}")
-            # Fall through to requests
-    
+def fetch_soup(url: str):
+    """Fetch HTML and parse with BeautifulSoup."""
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
         res.raise_for_status()
         return BeautifulSoup(res.text, "html.parser")
-    except requests.RequestException as e:
+    except requests.RequestException:
         return None
 
 def find_player_url(player_name: str):
@@ -70,7 +48,6 @@ def find_player_url(player_name: str):
         display_name = normalize_name(player_title_div.text)
         if normalized_query in display_name:
             href = tag.get('href', '')
-            print(f"[DEBUG] Found player link: {href}")
             # Make sure it's a direct player URL, not a search redirect
             if href.startswith('/player/'):
                 return BASE_URL + href
@@ -83,7 +60,6 @@ def find_player_url(player_name: str):
 
     if player_links:
         href = player_links[0].get('href', '')
-        print(f"[DEBUG] Using first result link: {href}")
         if href.startswith('/player/'):
             return BASE_URL + href
         elif '/player/' in href:
@@ -245,7 +221,6 @@ def get_match_from_team(team_url):
                     # No stats = likely upcoming match
                     return [match_url]
         except Exception as e:
-            print(f"[DEBUG] Error checking if match {match_url} is upcoming: {e}")
             continue
     
     # If we found upcoming matches, return the first one
@@ -365,32 +340,17 @@ def scrape_agent_stats_by_timespan(player_url: str):
 def scrape_match_links(player_url):
     """Scrape match links from player's match history page"""
     match_history_url = player_url.replace("/player/", "/player/matches/")
-    print(f"[DEBUG] Fetching match history from: {match_history_url}")
-    
-    # Try with Playwright first (for JS-rendered content)
-    soup = None
-    if PLAYWRIGHT_AVAILABLE:
-        print(f"[DEBUG] Trying with Playwright (JavaScript rendering)...")
-        soup = fetch_soup(match_history_url, use_playwright=True)
-    
-    # Fallback to regular requests if Playwright failed or not available
-    if not soup:
-        print(f"[DEBUG] Trying with regular requests...")
-        soup = fetch_soup(match_history_url, use_playwright=False)
+    soup = fetch_soup(match_history_url)
     
     if not soup:
-        print(f"[DEBUG] Failed to fetch match history page: {match_history_url}")
         return []
-
-    print(f"[DEBUG] Successfully fetched match history page")
     match_links = []
+    match_ids = []  # Initialize to avoid used-before-assignment error
     
     # SIMPLEST APPROACH: Find all links that look like match URLs
     # VLR match URLs are: /{numeric-id}/slug or just /{numeric-id}
     # Match IDs are typically 4+ digits
-    print(f"[DEBUG] Looking for match links on the page...")
     all_links = soup.select("a[href]")
-    print(f"[DEBUG] Found {len(all_links)} total links on page")
     
     for link in all_links:
         href = link.get('href', '')
@@ -411,7 +371,6 @@ def scrape_match_links(player_url):
                     full_url = BASE_URL + href
                     if full_url not in match_links:
                         match_links.append(full_url)
-                        print(f"[DEBUG] Found match link: {full_url}")
         elif href.startswith('http') and 'vlr.gg' in href:
             # Full URL - check if it's a match URL
             # Extract the path part
@@ -426,18 +385,14 @@ def scrape_match_links(player_url):
                     if first_part.isdigit() and len(first_part) >= 4:
                         if href not in match_links:
                             match_links.append(href)
-                            print(f"[DEBUG] Found match link (full URL): {href}")
             except:
                 pass
     
     if match_links:
-        print(f"[DEBUG] Found {len(match_links)} match links!")
         return match_links  # Return - we found matches!
     
     # FALLBACK: Try data-match-id approach if no links found
-    print(f"[DEBUG] Fallback: Checking data-match-id attributes...")
     data_elements = soup.select("[data-match-id]")
-    print(f"[DEBUG] Found {len(data_elements)} elements with data-match-id")
     
     if data_elements:
         for elem in data_elements:
@@ -454,10 +409,8 @@ def scrape_match_links(player_url):
                         continue
                     if match_url not in match_links:
                         match_links.append(match_url)
-                        print(f"[DEBUG] Found match link from data-match-id: {match_url}")
         
         if match_links:
-            print(f"[DEBUG] Found {len(match_links)} match links from data-match-id!")
             return match_links
     
     # Fallback: Try multiple selectors for match links
@@ -467,10 +420,8 @@ def scrape_match_links(player_url):
         "a.wf-module-item[href*='/']",  # Module items that might be matches
     ]
     
-    print(f"[DEBUG] Trying selector-based approach...")
     for selector in selectors:
         links = soup.select(selector)
-        print(f"[DEBUG] Selector '{selector}' found {len(links)} links")
         for a in links:
             href = a.get('href')
             if href and '/match/' in href:
@@ -487,15 +438,11 @@ def scrape_match_links(player_url):
                 if len(parts) >= 4 and parts[-1].isdigit():
                     if full_link not in match_links:
                         match_links.append(full_link)
-                        print(f"[DEBUG] Added match link: {full_link}")
     
     # Also try finding links in match history table
-    print(f"[DEBUG] Trying table-based approach...")
     match_tables = soup.select("table.wf-table, table.wf-table-inset")
-    print(f"[DEBUG] Found {len(match_tables)} tables")
     for table in match_tables:
         rows = table.select("tbody tr")
-        print(f"[DEBUG] Found {len(rows)} rows in table")
         for row in rows:
             link_tag = row.select_one("a[href*='/match/']")
             if link_tag:
@@ -509,16 +456,12 @@ def scrape_match_links(player_url):
                         continue
                     if full_link not in match_links:
                         match_links.append(full_link)
-                        print(f"[DEBUG] Added match link from table: {full_link}")
     
     # Try even more generic approach - find ALL links and filter
-    print(f"[DEBUG] Trying generic link approach...")
     all_links = soup.select("a[href]")
-    print(f"[DEBUG] Found {len(all_links)} total links on page")
     
     # Look for links that contain match IDs we found
     if match_ids:
-        print(f"[DEBUG] Looking for links containing match IDs: {match_ids[:5]}...")
         for link in all_links:
             href = link.get('href', '')
             if href:
@@ -535,15 +478,7 @@ def scrape_match_links(player_url):
                             continue
                         if full_link not in match_links:
                             match_links.append(full_link)
-                            print(f"[DEBUG] Found match link via ID search: {full_link}")
                             break
-    
-    # Debug: Show first 10 links to see what we're dealing with
-    print(f"[DEBUG] Sample links found:")
-    for i, a in enumerate(all_links[:10]):
-        href = a.get('href', '')
-        text = a.text.strip()[:50] if a.text else ''
-        print(f"[DEBUG]   Link {i+1}: {href} (text: {text})")
     
     for a in all_links:
         href = a.get('href', '')
@@ -565,12 +500,10 @@ def scrape_match_links(player_url):
                         break
                 if match_id and full_link not in match_links:
                     match_links.append(full_link)
-                    print(f"[DEBUG] Added match link (generic): {full_link}")
     
     
     # Check for script tags that might contain match data (JSON/API responses)
     scripts = soup.select("script")
-    print(f"[DEBUG] Found {len(scripts)} script tags")
     for i, script in enumerate(scripts):
         if script.string:
             content = script.string
@@ -578,32 +511,27 @@ def scrape_match_links(player_url):
             if 'match' in content.lower() or 'game' in content.lower() or 'player' in content.lower():
                 # Check if it contains JSON-like data
                 if '{' in content and ('match' in content.lower() or 'id' in content.lower()):
-                    print(f"[DEBUG] Script {i+1} contains potential match data (length: {len(content)})")
                     # Try to find URLs or IDs in the script
                     import re
                     # Look for match URLs
                     match_urls = re.findall(r'["\']([^"\']*match[^"\']*)["\']', content, re.IGNORECASE)
                     if match_urls:
-                        print(f"[DEBUG]   Found potential match URLs in script: {match_urls[:5]}")
+                        pass  # Could extract URLs here if needed
                     # Look for numeric IDs that might be match IDs
                     match_ids = re.findall(r'\b\d{4,}\b', content)  # 4+ digit numbers
                     if match_ids:
-                        print(f"[DEBUG]   Found potential match IDs: {match_ids[:10]}")
+                        pass  # Could use IDs here if needed
     
     # Check page structure - maybe matches are in a different format
-    print(f"[DEBUG] Checking page structure...")
     # Look for common match container classes
     match_containers = soup.select("[class*='match'], [class*='game'], [class*='event']")
-    print(f"[DEBUG] Found {len(match_containers)} elements with match/game/event in class")
     
     # Check if matches are in data attributes
     for elem in data_elements[:10]:  # Check first 10
         attrs = elem.attrs
         for key, value in attrs.items():
             if 'match' in key.lower() or 'game' in key.lower():
-                print(f"[DEBUG]   Found data attribute: {key} = {value}")
-    
-    print(f"[DEBUG] Total match links found: {len(match_links)}")
+                pass  # Could extract match data here if needed
     return match_links
 
 def get_match_title(soup):
@@ -710,7 +638,6 @@ def find_match_urls_for_teams(team_list, max_matches_per_pair=3):
             for j in range(i + 1, len(team_list)):
                 team1 = team_list[i]
                 team2 = team_list[j]
-                print(f"[DEBUG] Searching for matches between {team1} and {team2}")
                 matches = find_matches_between_teams(team1, team2, limit=max_matches_per_pair)
                 for match_url in matches:
                     if match_url not in match_urls:
@@ -860,11 +787,9 @@ def parse_match_page(match_url, player_name):
         map_sections = soup.select("div[class*='stats-game'], div.match-stats-game")
     
     if not map_sections:
-        print(f"[DEBUG] No map sections found in {match_url}")
         return []
 
     normalized_player = normalize_name(player_name)
-    print(f"[DEBUG] Looking for player '{player_name}' (normalized: '{normalized_player}') in {match_url}")
     
     for section in map_sections:
         # Try multiple ways to get map name
@@ -921,8 +846,6 @@ def parse_match_page(match_url, player_name):
                 # Try partial match (in case of nicknames or variations)
                 if normalized_player not in normalized_name and normalized_name not in normalized_player:
                     continue
-                else:
-                    print(f"[DEBUG] Partial match found: '{name}' (normalized: '{normalized_name}') matches '{normalized_player}'")
 
             # Get agent
             agent = "<Unknown Agent>"
@@ -968,11 +891,8 @@ def parse_match_page(match_url, player_name):
                 "match_title": match_title,
                 "match_date": match_date
             })
-            print(f"[DEBUG] Found player '{name}' on map '{map_name}' with {kills} kills")
             break  # only one row per map for player
 
-    if maps_data:
-        print(f"[DEBUG] Successfully parsed {len(maps_data)} maps from {match_url}")
     return maps_data
 
 def group_kills_by_match(all_maps, player_name, max_maps=2):

@@ -4,6 +4,15 @@ Instructions for running the Valorant Pick'em Analyzer locally.
 
 ---
 
+## Architecture
+
+This project uses a **separated frontend/backend architecture**:
+- **Frontend**: Static files in `static/` folder, deployed to Vercel
+- **Backend**: Flask API in `app.py`, deployed to Render
+- **Local Development**: Both can run locally for testing
+
+---
+
 ## Prerequisites
 
 - Python 3.7 or higher
@@ -11,7 +20,9 @@ Instructions for running the Valorant Pick'em Analyzer locally.
 
 ---
 
-## Installation
+## Local Development
+
+**Easy setup - just one command!**
 
 1. **Install dependencies**
 
@@ -19,7 +30,7 @@ Instructions for running the Valorant Pick'em Analyzer locally.
    pip install -r requirements.txt
    ```
 
-2. **Run the Flask server**
+2. **Run the server**
 
    ```powershell
    python app.py
@@ -29,21 +40,31 @@ Instructions for running the Valorant Pick'em Analyzer locally.
 
    Navigate to `http://localhost:5000`
 
+That's it! The Flask server automatically serves the frontend in development mode.
+
+**How it works:**
+- **Development** (local): Flask serves both API and frontend files
+- **Production** (Render): Flask only serves API endpoints (frontend is on Vercel)
+
+The app detects development mode automatically (no `ALLOWED_ORIGINS` env var = dev mode).
+
 ---
 
 ## Project Structure
 
 ```
 valorant-pickem-analyzer/
-├── app.py                 # Flask backend server
+├── app.py                 # Flask backend API (Render)
+├── vercel.json            # Vercel config for frontend
 ├── README.md
 ├── SETUP.md              # This file
-├── requirements.txt  # Python dependencies
-├── static/
+├── requirements.txt       # Python dependencies (backend)
+├── static/               # Frontend files (Vercel)
 │   ├── index.html        # Frontend HTML
-│   ├── styles.css        # Modern CSS styling
-│   └── app.js            # Frontend JavaScript
-├── scraper/
+│   ├── styles.css        # CSS styling
+│   ├── app.js            # Frontend JavaScript
+│   └── favicon.ico       # Site favicon
+├── scraper/              # Backend scrapers
 │   ├── vlr.py           # VLR.gg scraping functions
 │   └── underdog.py       # Underdog Fantasy API client
 ```
@@ -52,8 +73,31 @@ valorant-pickem-analyzer/
 
 ## API Endpoints
 
+- `GET /` - API info and available endpoints
+- `GET /health` - Health check endpoint
 - `GET /api/slate` - Get Underdog slate with VLR stats comparison
 - `GET /api/player/<player_name>` - Get detailed stats for a specific player
+
+---
+
+## Deployment
+
+### Backend (Render)
+
+1. Connect your GitHub repo to Render
+2. Set environment variable:
+   - `ALLOWED_ORIGINS`: Comma-separated list of Vercel domains
+     - Example: `https://your-app.vercel.app,https://your-app-git-main.vercel.app`
+     - Include both production and preview URLs
+3. The backend will automatically handle CORS for these domains
+
+### Frontend (Vercel)
+
+1. Connect your GitHub repo to Vercel
+2. Set output directory to `static` (configured in `vercel.json`)
+3. The frontend automatically detects the environment and uses the correct API URL:
+   - Production: `https://valorant-pickem-analyzer.onrender.com/api`
+   - Local dev: `http://localhost:5000/api`
 
 ---
 

@@ -114,34 +114,9 @@ function displaySlate(data) {
             const players = matchData.players || [];
             
             if (teams.length >= 2) {
-                // This is a match with 2 teams - organize by team
-                const team1 = teams[0];
-                const team2 = teams[1];
-                const team1Players = [];
-                const team2Players = [];
-                
+                // Backend has already organized players by team correctly
+                // Just display them in the order they come (team1 players first, then team2 players)
                 players.forEach(player => {
-                    const playerTeam = (player.team || '').toLowerCase().trim();
-                    const normalizedTeam1 = team1.toLowerCase().trim();
-                    const normalizedTeam2 = team2.toLowerCase().trim();
-                    
-                    // More precise matching
-                    if (playerTeam === normalizedTeam1 || 
-                        playerTeam.includes(normalizedTeam1) || 
-                        normalizedTeam1.includes(playerTeam)) {
-                        team1Players.push(player);
-                    } else if (playerTeam === normalizedTeam2 || 
-                               playerTeam.includes(normalizedTeam2) || 
-                               normalizedTeam2.includes(playerTeam)) {
-                        team2Players.push(player);
-                    } else {
-                        // Fallback - add to team1 if can't determine
-                        team1Players.push(player);
-                    }
-                });
-                
-                // Display team 1 players
-                team1Players.forEach(player => {
                     const hasError = player.error;
                     const rowClass = hasError ? 'error-row' : '';
                     html += `<tr class="${rowClass}">`;
@@ -151,36 +126,7 @@ function displaySlate(data) {
                     } else {
                         html += `<td><strong>${player.player}</strong></td>`;
                     }
-                    // Team name as link - always use player.team from API
-                    if (player.team_url) {
-                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
-                    } else {
-                        html += `<td>${player.team || 'N/A'}</td>`;
-                    }
-                    html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
-                    html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
-                    html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
-                    html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
-                    if (hasError) {
-                        html += `<td class="error-cell" title="${player.error}">⚠️</td>`;
-                    } else {
-                        html += `<td class="success-cell">✓</td>`;
-                    }
-                    html += '</tr>';
-                });
-                
-                // Display team 2 players (opposing team)
-                team2Players.forEach(player => {
-                    const hasError = player.error;
-                    const rowClass = hasError ? 'error-row' : '';
-                    html += `<tr class="${rowClass}">`;
-                    // Player name as link
-                    if (player.vlr_url) {
-                        html += `<td><strong><a href="${player.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${player.player}</a></strong></td>`;
-                    } else {
-                        html += `<td><strong>${player.player}</strong></td>`;
-                    }
-                    // Team name as link - always use player.team from API
+                    // Team name as link - always use player.team from API (player's actual team)
                     if (player.team_url) {
                         html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
                     } else {
