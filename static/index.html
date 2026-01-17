@@ -25,7 +25,21 @@
     </section>
 
     <div class="container">
-        <div id="loading" class="loading hidden">Loading...</div>
+        <div id="loading" class="loading hidden">
+            <div class="loading-main">
+                <div id="loadingMessage" class="loading-message">Loading...</div>
+                <div class="loading-progress">
+                    <div id="progressBar" class="progress-bar">
+                        <div id="progressFill" class="progress-fill"></div>
+                    </div>
+                    <div id="progressText" class="progress-text">0%</div>
+                </div>
+                <button id="toggleDetails" class="btn-details">Show Details</button>
+            </div>
+            <div id="loadingDetails" class="loading-details hidden">
+                <div id="progressDetails" class="progress-details"></div>
+            </div>
+        </div>
         <div id="error" class="error hidden"></div>
         <div id="results"></div>
     </div>

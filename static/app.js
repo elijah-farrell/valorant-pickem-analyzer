@@ -3,20 +3,128 @@ const API_BASE = (typeof window !== 'undefined' && window.API_BASE_URL)
     ? window.API_BASE_URL 
     : 'http://localhost:5000/api';
 
+// Valorant-themed loading messages
+const VALORANT_MESSAGES = [
+    "Spike planted... analyzing stats",
+    "Clutch or kick... fetching data",
+    "Ace incoming... processing players",
+    "One tap... loading slate",
+    "Frag out... scraping VLR.gg",
+    "GG EZ... almost done",
+    "Sit... gathering intel",
+    "Diff... comparing stats",
+    "Jett diff... loading matches",
+    "Raze ult... processing data",
+    "Sova dart... finding players",
+    "Omen TP... fetching stats",
+    "Reyna dismiss... analyzing",
+    "Sage res... loading results",
+    "Brimstone ult... finalizing"
+];
+
+let messageInterval = null;
+let progressPollInterval = null;
+let currentJobId = null;
+
 function showLoading() {
     document.getElementById('loading').classList.remove('hidden');
     document.getElementById('error').classList.add('hidden');
     document.getElementById('results').innerHTML = '';
+    document.getElementById('loadingDetails').classList.add('hidden');
+    document.getElementById('toggleDetails').textContent = 'Show Details';
     // Disable buttons during loading
     document.getElementById('loadSlate').disabled = true;
     document.getElementById('searchPlayer').disabled = true;
+    
+    // Start rotating Valorant messages
+    startMessageRotation();
+    updateProgress(0, 0, []);
 }
 
 function hideLoading() {
     document.getElementById('loading').classList.add('hidden');
+    // Stop message rotation and progress polling
+    stopMessageRotation();
+    stopProgressPolling();
     // Re-enable buttons
     document.getElementById('loadSlate').disabled = false;
     document.getElementById('searchPlayer').disabled = false;
+}
+
+function startMessageRotation() {
+    let messageIndex = 0;
+    const messageEl = document.getElementById('loadingMessage');
+    
+    // Update immediately
+    messageEl.textContent = VALORANT_MESSAGES[messageIndex];
+    
+    messageInterval = setInterval(() => {
+        messageIndex = (messageIndex + 1) % VALORANT_MESSAGES.length;
+        messageEl.textContent = VALORANT_MESSAGES[messageIndex];
+    }, 2000); // Change message every 2 seconds
+}
+
+function stopMessageRotation() {
+    if (messageInterval) {
+        clearInterval(messageInterval);
+        messageInterval = null;
+    }
+}
+
+function updateProgress(current, total, details) {
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const progressDetails = document.getElementById('progressDetails');
+    
+    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+    progressFill.style.width = `${percent}%`;
+    progressText.textContent = `${percent}%`;
+    
+    // Update details - show only the most recent/last detail
+    if (details && details.length > 0) {
+        const latestDetail = details[details.length - 1]; // Get the last/most recent detail
+        progressDetails.innerHTML = `<div class="detail-item">${latestDetail}</div>`;
+    }
+}
+
+function startProgressPolling(jobId) {
+    currentJobId = jobId;
+    progressPollInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`${API_BASE}/progress/${jobId}`);
+            if (response.ok) {
+                const progress = await response.json();
+                updateProgress(progress.current, progress.total, progress.details);
+                
+                if (progress.status === 'complete') {
+                    stopProgressPolling();
+                    // Display the result
+                    if (progress.result) {
+                        displaySlate(progress.result);
+                    } else {
+                        showError('Processing complete but no data received');
+                    }
+                } else if (progress.status === 'error') {
+                    stopProgressPolling();
+                    showError(progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing');
+                }
+            } else if (response.status === 404) {
+                // Job not found - might have expired, stop polling
+                stopProgressPolling();
+                showError('Progress tracking expired. Please try again.');
+            }
+        } catch (error) {
+            // Silently fail - progress is optional
+        }
+    }, 2000); // Poll every 2 seconds - each player takes 3-5+ seconds anyway, so this is plenty responsive
+}
+
+function stopProgressPolling() {
+    if (progressPollInterval) {
+        clearInterval(progressPollInterval);
+        progressPollInterval = null;
+    }
+    currentJobId = null;
 }
 
 function showError(message) {
@@ -289,23 +397,30 @@ async function loadSlate() {
     }
     
     showLoading();
+    updateProgress(0, 1, ['Connecting to Underdog API...']);
     
     try {
         const response = await fetch(`${API_BASE}/slate`);
         const data = await response.json();
         
         if (!response.ok) {
-            // If API returned an error object
             const errorMsg = data.error || data.details || `HTTP error! status: ${response.status}`;
             throw new Error(errorMsg);
         }
         
-        // Check if response has error field even with 200 status (but not for no-slate case)
         if (data.error && !data.message) {
             throw new Error(data.error);
         }
         
-        displaySlate(data);
+        // If we got a job_id, poll for progress and result
+        if (data.job_id) {
+            startProgressPolling(data.job_id);
+        } else if (data.players) {
+            // Fallback: if we got data directly (no job_id), display it
+            displaySlate(data);
+        } else {
+            throw new Error('No data received');
+        }
     } catch (error) {
         showError(`Failed to load slate: ${error.message}`);
     }
@@ -480,6 +595,17 @@ function showMoreMatches() {
 // Event listeners
 document.getElementById('loadSlate').addEventListener('click', loadSlate);
 document.getElementById('searchPlayer').addEventListener('click', searchPlayer);
+document.getElementById('toggleDetails').addEventListener('click', () => {
+    const detailsEl = document.getElementById('loadingDetails');
+    const toggleBtn = document.getElementById('toggleDetails');
+    if (detailsEl.classList.contains('hidden')) {
+        detailsEl.classList.remove('hidden');
+        toggleBtn.textContent = 'Hide Details';
+    } else {
+        detailsEl.classList.add('hidden');
+        toggleBtn.textContent = 'Show Details';
+    }
+});
 document.getElementById('playerSearch').addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
         searchPlayer();

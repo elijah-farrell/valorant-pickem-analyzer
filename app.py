@@ -1,4 +1,7 @@
 import os
+import uuid
+import threading
+from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -37,6 +40,34 @@ else:
     allowed_origins = '*'
     
 CORS(app, origins=allowed_origins, supports_credentials=True)
+
+# Progress tracking - simple in-memory store (cleaned up after 5 minutes)
+progress_store = {}
+progress_lock = threading.Lock()
+
+def update_progress(job_id, status, current, total, details=None, result=None):
+    """Update progress for a job"""
+    with progress_lock:
+        progress_data = {
+            'status': status,  # 'loading', 'complete', 'error'
+            'current': current,
+            'total': total,
+            'details': details or [],
+            'updated_at': datetime.now()
+        }
+        if result is not None:
+            progress_data['result'] = result
+        progress_store[job_id] = progress_data
+        # Clean up old progress (older than 5 minutes)
+        cutoff = datetime.now() - timedelta(minutes=5)
+        to_remove = [jid for jid, data in progress_store.items() if data['updated_at'] < cutoff]
+        for jid in to_remove:
+            del progress_store[jid]
+
+def get_progress(job_id):
+    """Get current progress for a job"""
+    with progress_lock:
+        return progress_store.get(job_id)
 
 # Rate limiting
 limiter = Limiter(
@@ -162,6 +193,25 @@ if is_development:
 def health():
     """Health check endpoint for Render to keep service alive"""
     return jsonify({'status': 'ok', 'service': 'valorant-pickem-analyzer'})
+
+@app.route('/api/progress/<job_id>')
+@limiter.exempt  # Progress polling needs to be frequent, don't rate limit it
+def get_progress_endpoint(job_id):
+    """Get progress for a job"""
+    progress = get_progress(job_id)
+    if not progress:
+        return jsonify({'error': 'Job not found'}), 404
+    response = {
+        'status': progress['status'],
+        'current': progress['current'],
+        'total': progress['total'],
+        'details': progress['details'],
+        'progress_pct': round((progress['current'] / progress['total']) * 100) if progress['total'] > 0 else 0
+    }
+    # Include result if complete
+    if progress['status'] == 'complete' and 'result' in progress:
+        response['result'] = progress['result']
+    return jsonify(response)
 
 @app.route('/api/slate', methods=['GET'])
 @limiter.limit("10 per minute")  # Limit to 10 requests per minute per IP
@@ -375,172 +425,188 @@ def get_slate():
                     if not match_teams:
                         match_teams = [home_team_name, away_team_name]
 
-        # Fetch VLR stats for each player (shared pipeline: get_player_vlr_kill_averages)
-        results = []
-        for player_data in player_info:
-            player = player_data['player']
-            line = player_data['line']
-            # Use team from Underdog API (never guess/scrape from VLR)
-            team_from_underdog = player_data.get('team')
-            team_id_from_underdog = player_data.get('team_id')  # Store team_id for reliable matching
-            player_id_from_underdog = player_data.get('player_id')  # Store player_id for reliable lookup
-            
+        # Create job ID for progress tracking and return immediately
+        job_id = str(uuid.uuid4())
+        total_players = len(player_info)
+        update_progress(job_id, 'loading', 0, total_players, ['Starting to fetch player stats from VLR.gg...'])
+        
+        # Start background processing
+        def process_slate_background():
             try:
-                r = get_player_vlr_kill_averages(player)
-                row = {
-                    'player': player,
-                    'line': line,
-                    'odds_over': player_data['odds_over'],
-                    'odds_under': player_data['odds_under'],
-                    'team': team_from_underdog,
-                    'team_id': team_id_from_underdog,
-                    'player_id': player_id_from_underdog,
-                    'team_url': r['team_url'],
-                    'vlr_url': r['vlr_url'],
-                    'avg_last_5': r['avg_last_5'],
-                    'avg_last_10': r['avg_last_10'],
-                    'avg_last_25': r['avg_last_25'],
-                    'match_id': player_data.get('match_id'),
-                }
-                if r['error']:
-                    row['error'] = r['error']
-                else:
-                    row['matches_analyzed'] = len(r['good_matches'])
-                results.append(row)
-            except Exception as e:
-                # Extract a more user-friendly error message
-                error_msg = str(e)
-                if "timeout" in error_msg.lower():
-                    error_msg = "Request timeout - VLR.gg may be slow or unavailable"
-                elif "connection" in error_msg.lower():
-                    error_msg = "Connection error - cannot reach VLR.gg"
-                elif "404" in error_msg or "not found" in error_msg.lower():
-                    error_msg = "Player page not found on VLR.gg"
-                else:
-                    error_msg = f"Scraping error: {error_msg[:100]}"  # Limit length
-                
-                results.append({
-                    'player': player,
-                    'line': line,
-                    'odds_over': player_data['odds_over'],
-                    'odds_under': player_data['odds_under'],
-                    'team': team_from_underdog,  # Use Underdog team from API
-                    'team_id': team_id_from_underdog,  # Store team_id from API
-                    'player_id': player_id_from_underdog,  # Store player_id from API
-                    'team_url': None,
-                    'vlr_url': None,
-                    'avg_last_5': None,
-                    'avg_last_10': None,
-                    'avg_last_25': None,
-                    'error': error_msg,
-                    'match_id': player_data.get('match_id')
-                })
-
-        # Organize players by match using match_id from results (all from Underdog API - no VLR scraping!)
-        players_by_match = {}  # Map match_key -> {teams: [team1, team2], players: []}
-        
-        if len(all_matches_info) > 0:
-            # Map: match_id -> match_info for quick lookup
-            match_id_to_match_info = {}
-            for match_info in all_matches_info:
-                match_id = match_info.get('match_id')
-                if match_id:
-                    match_id_to_match_info[match_id] = match_info
-            
-            # Group results by match_id
-            match_id_to_results = {}
-            for player_result in results:
-                match_id = player_result.get('match_id')
-                if match_id:
-                    if match_id not in match_id_to_results:
-                        match_id_to_results[match_id] = []
-                    match_id_to_results[match_id].append(player_result)
-            
-            # For each match, organize players by team
-            for match_info in all_matches_info:
-                match_id = match_info.get('match_id')
-                match_key = match_info.get('match_key')
-                teams = match_info.get('teams', [])
-                
-                if not match_key or len(teams) < 2:
-                    continue
-                
-                team1 = teams[0]
-                team2 = teams[1]
-                
-                if match_key not in players_by_match:
-                    players_by_match[match_key] = {
-                        'teams': [team1, team2],
-                        'players': []
-                    }
-                
-                # Get players for this match_id
-                match_players = match_id_to_results.get(match_id, [])
-                
-                # Sort players by team: team1 players first, then team2 players
-                # Use team_id directly from API - straightforward comparison
-                team1_players = []
-                team2_players = []
-                
-                # Get the game for this match to access team IDs
-                game = match_id_to_game.get(match_id)
-                if not game:
-                    continue  # Skip if no game info
-                
-                home_team_id = game.get("home_team_id")
-                away_team_id = game.get("away_team_id")
-                
-                for player_result in match_players:
-                    # Get team_id directly from player_result (stored from API)
-                    player_team_id = player_result.get('team_id')
+                # Fetch VLR stats for each player (shared pipeline: get_player_vlr_kill_averages)
+                results = []
+                for idx, player_data in enumerate(player_info, 1):
+                    player = player_data['player']
+                    # Show one clear message per player
+                    update_progress(job_id, 'loading', idx, total_players, [
+                        f'Processing {player} ({idx}/{total_players})...'
+                    ])
+                    line = player_data['line']
+                    # Use team from Underdog API (never guess/scrape from VLR)
+                    team_from_underdog = player_data.get('team')
+                    team_id_from_underdog = player_data.get('team_id')  # Store team_id for reliable matching
+                    player_id_from_underdog = player_data.get('player_id')  # Store player_id for reliable lookup
                     
-                    if not player_team_id:
-                        continue
-                    
-                    # Assign player to correct team based on team_id comparison
-                    if player_team_id == home_team_id:
-                        team1_players.append(player_result)
-                    elif player_team_id == away_team_id:
-                        team2_players.append(player_result)
-                    # If team_id doesn't match, skip (likely data inconsistency)
-                
-                # Add team1 players first, then team2 players
-                players_by_match[match_key]['players'].extend(team1_players)
-                players_by_match[match_key]['players'].extend(team2_players)
-            
-            # Add any remaining players (not in any match) to "Other"
-            all_assigned_player_names = set()
-            for match_data in players_by_match.values():
-                for player in match_data['players']:
-                    player_name = player.get('player', '').strip()
-                    if player_name:
-                        all_assigned_player_names.add(player_name)
-            
-            for player_result in results:
-                player_name = player_result.get('player', '').strip()
-                if player_name and player_name not in all_assigned_player_names:
-                    if 'Other' not in players_by_match:
-                        players_by_match['Other'] = {
-                            'teams': [],
-                            'players': []
+                    try:
+                        r = get_player_vlr_kill_averages(player)
+                        row = {
+                            'player': player,
+                            'line': line,
+                            'odds_over': player_data['odds_over'],
+                            'odds_under': player_data['odds_under'],
+                            'team': team_from_underdog,
+                            'team_id': team_id_from_underdog,
+                            'player_id': player_id_from_underdog,
+                            'team_url': r['team_url'],
+                            'vlr_url': r['vlr_url'],
+                            'avg_last_5': r['avg_last_5'],
+                            'avg_last_10': r['avg_last_10'],
+                            'avg_last_25': r['avg_last_25'],
+                            'match_id': player_data.get('match_id'),
                         }
-                    players_by_match['Other']['players'].append(player_result)
-                    all_assigned_player_names.add(player_name)
-        else:
-            # No match info - add all players to a single group
-            if results:
-                players_by_match['All Players'] = {
-                    'teams': [],
-                    'players': results
-                }
+                        if r['error']:
+                            row['error'] = r['error']
+                        else:
+                            row['matches_analyzed'] = len(r['good_matches'])
+                        results.append(row)
+                    except Exception:
+                        # Extract a more user-friendly error message
+                        error_msg = "Error fetching player stats"
+                        results.append({
+                            'player': player,
+                            'line': line,
+                            'odds_over': player_data['odds_over'],
+                            'odds_under': player_data['odds_under'],
+                            'team': team_from_underdog,
+                            'team_id': team_id_from_underdog,
+                            'player_id': player_id_from_underdog,
+                            'team_url': None,
+                            'vlr_url': None,
+                            'avg_last_5': None,
+                            'avg_last_10': None,
+                            'avg_last_25': None,
+                            'error': error_msg,
+                            'match_id': player_data.get('match_id')
+                        })
+
+                # Mark progress as complete
+                update_progress(job_id, 'loading', total_players, total_players, ['Organizing players by match...'])
+                
+                # Organize players by match using match_id from results (all from Underdog API - no VLR scraping!)
+                players_by_match = {}  # Map match_key -> {teams: [team1, team2], players: []}
+                
+                if len(all_matches_info) > 0:
+                    # Map: match_id -> match_info for quick lookup
+                    match_id_to_match_info = {}
+                    for match_info in all_matches_info:
+                        match_id = match_info.get('match_id')
+                        if match_id:
+                            match_id_to_match_info[match_id] = match_info
+                    
+                    # Group results by match_id
+                    match_id_to_results = {}
+                    for player_result in results:
+                        match_id = player_result.get('match_id')
+                        if match_id:
+                            if match_id not in match_id_to_results:
+                                match_id_to_results[match_id] = []
+                            match_id_to_results[match_id].append(player_result)
+                    
+                    # For each match, organize players by team
+                    for match_info in all_matches_info:
+                        match_id = match_info.get('match_id')
+                        match_key = match_info.get('match_key')
+                        teams = match_info.get('teams', [])
+                        
+                        if not match_key or len(teams) < 2:
+                            continue
+                        
+                        team1 = teams[0]
+                        team2 = teams[1]
+                        
+                        if match_key not in players_by_match:
+                            players_by_match[match_key] = {
+                                'teams': [team1, team2],
+                                'players': []
+                            }
+                        
+                        # Get players for this match_id
+                        match_players = match_id_to_results.get(match_id, [])
+                        
+                        # Sort players by team: team1 players first, then team2 players
+                        # Use team_id directly from API - straightforward comparison
+                        team1_players = []
+                        team2_players = []
+                        
+                        # Get the game for this match to access team IDs
+                        game = match_id_to_game.get(match_id)
+                        if not game:
+                            continue  # Skip if no game info
+                        
+                        home_team_id = game.get("home_team_id")
+                        away_team_id = game.get("away_team_id")
+                        
+                        for player_result in match_players:
+                            # Get team_id directly from player_result (stored from API)
+                            player_team_id = player_result.get('team_id')
+                            
+                            if not player_team_id:
+                                continue
+                            
+                            # Assign player to correct team based on team_id comparison
+                            if player_team_id == home_team_id:
+                                team1_players.append(player_result)
+                            elif player_team_id == away_team_id:
+                                team2_players.append(player_result)
+                            # If team_id doesn't match, skip (likely data inconsistency)
+                        
+                        # Add team1 players first, then team2 players
+                        players_by_match[match_key]['players'].extend(team1_players)
+                        players_by_match[match_key]['players'].extend(team2_players)
+                    
+                    # Add any remaining players (not in any match) to "Other"
+                    all_assigned_player_names = set()
+                    for match_data in players_by_match.values():
+                        for player in match_data['players']:
+                            player_name = player.get('player', '').strip()
+                            if player_name:
+                                all_assigned_player_names.add(player_name)
+                    
+                    for player_result in results:
+                        player_name = player_result.get('player', '').strip()
+                        if player_name and player_name not in all_assigned_player_names:
+                            if 'Other' not in players_by_match:
+                                players_by_match['Other'] = {
+                                    'teams': [],
+                                    'players': []
+                                }
+                            players_by_match['Other']['players'].append(player_result)
+                            all_assigned_player_names.add(player_name)
+                else:
+                    # No match info - add all players to a single group
+                    if results:
+                        players_by_match['All Players'] = {
+                            'teams': [],
+                            'players': results
+                        }
+                
+                # Mark as complete
+                update_progress(job_id, 'complete', total_players, total_players, ['Complete! All players processed.'], {
+                    'players': results,
+                    'match_teams': match_teams,
+                    'match_url': match_url if match_url else None,
+                    'players_by_match': players_by_match
+                })
+            except Exception as e:
+                update_progress(job_id, 'error', 0, total_players, [f'Error: {str(e)}'])
         
+        # Start background thread
+        thread = threading.Thread(target=process_slate_background)
+        thread.daemon = True
+        thread.start()
         
-        return jsonify({
-            'players': results,
-            'match_teams': match_teams,
-            'match_url': match_url if match_url else None,
-            'players_by_match': players_by_match
-        })
+        # Return job_id immediately
+        return jsonify({'job_id': job_id})
     except Exception as e:
         error_msg = "Unable to fetch slate data. Please try again later."
         return jsonify({'error': error_msg}), 500
