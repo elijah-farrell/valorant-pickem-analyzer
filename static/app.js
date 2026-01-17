@@ -52,6 +52,14 @@ function confirmClearData(action) {
     return confirm('This will remove currently displayed data. Continue?');
 }
 
+function cleanTeamName(teamName) {
+    if (!teamName || teamName === 'N/A') {
+        return teamName;
+    }
+    // Remove patterns like " (1)", " (2)", etc. from the end of team names
+    return teamName.replace(/\s*\(\d+\)\s*$/, '').trim();
+}
+
 function formatStat(value, line) {
     if (value === null || value === undefined) {
         return '<span class="stat-cell stat-na">N/A</span>';
@@ -128,9 +136,9 @@ function displaySlate(data) {
                     }
                     // Team name as link - always use player.team from API (player's actual team)
                     if (player.team_url) {
-                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
+                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
                     } else {
-                        html += `<td>${player.team || 'N/A'}</td>`;
+                        html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
                     }
                     html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                     html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -169,9 +177,9 @@ function displaySlate(data) {
                         }
                         // Team name as link - always use player.team from API
                         if (player.team_url) {
-                            html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
+                            html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
                         } else {
-                            html += `<td>${player.team || 'N/A'}</td>`;
+                            html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
                         }
                         html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                         html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -221,9 +229,9 @@ function displaySlate(data) {
                 }
                 // Team name as link - always use player.team from API
                 if (player.team_url) {
-                    html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
+                    html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
                 } else {
-                    html += `<td>${player.team || 'N/A'}</td>`;
+                    html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
                 }
                 html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
                 html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -250,9 +258,9 @@ function displaySlate(data) {
             }
             // Team name as link
             if (player.team_url) {
-                html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${player.team || 'N/A'}</a></td>`;
+                html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
             } else {
-                html += `<td>${player.team || 'N/A'}</td>`;
+                html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
             }
             html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
             html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
@@ -346,9 +354,9 @@ function displayPlayerStats(data) {
     if (data.team) {
         // Make team name a link to team's VLR page
         if (data.team_url) {
-            html += `<span style="margin-right: 20px;">Team: <strong><a href="${data.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${data.team}</a></strong></span>`;
+            html += `<span style="margin-right: 20px;">Team: <strong><a href="${data.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(data.team)}</a></strong></span>`;
         } else {
-            html += `<span style="margin-right: 20px;">Team: <strong>${data.team}</strong></span>`;
+            html += `<span style="margin-right: 20px;">Team: <strong>${cleanTeamName(data.team)}</strong></span>`;
         }
     }
     html += '</div>';
