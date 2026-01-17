@@ -1,9 +1,12 @@
 import os
 import uuid
+import json
 import threading
+import queue
+import time
 from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -43,10 +46,11 @@ CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # Progress tracking - simple in-memory store (cleaned up after 5 minutes)
 progress_store = {}
+progress_queues = {}  # job_id -> queue.Queue for SSE updates
 progress_lock = threading.Lock()
 
 def update_progress(job_id, status, current, total, details=None, result=None):
-    """Update progress for a job"""
+    """Update progress for a job and push to SSE queue"""
     with progress_lock:
         progress_data = {
             'status': status,  # 'loading', 'complete', 'error'
@@ -58,11 +62,31 @@ def update_progress(job_id, status, current, total, details=None, result=None):
         if result is not None:
             progress_data['result'] = result
         progress_store[job_id] = progress_data
+        
+        # Ensure queue exists (create if doesn't exist yet)
+        if job_id not in progress_queues:
+            progress_queues[job_id] = queue.Queue(maxsize=50)  # Larger queue for more updates
+        
+        # Push to SSE queue
+        try:
+            progress_queues[job_id].put_nowait(progress_data)
+        except queue.Full:
+            # Queue full - try to clear old items and add new one
+            try:
+                # Remove oldest item
+                progress_queues[job_id].get_nowait()
+                progress_queues[job_id].put_nowait(progress_data)
+            except queue.Empty:
+                pass
+        
         # Clean up old progress (older than 5 minutes)
         cutoff = datetime.now() - timedelta(minutes=5)
         to_remove = [jid for jid, data in progress_store.items() if data['updated_at'] < cutoff]
         for jid in to_remove:
-            del progress_store[jid]
+            if jid in progress_store:
+                del progress_store[jid]
+            if jid in progress_queues:
+                del progress_queues[jid]
 
 def get_progress(job_id):
     """Get current progress for a job"""
@@ -96,11 +120,13 @@ def compute_averages(good_matches, windows=(5, 10, 25)):
     return averages
 
 
-def get_player_vlr_kill_averages(player_name):
+def get_player_vlr_kill_averages(player_name, progress_callback=None):
     """
     Shared VLR pipeline: find player -> fetch page -> scrape match links -> parse matches -> kill averages.
     Returns dict with vlr_url, team_url, avg_last_5/10/25, good_matches, soup (for reuse), and error if any.
     Used by both /api/slate and /api/player.
+    
+    progress_callback: Optional function(message, match_progress) to call with progress updates
     """
     out = {
         'vlr_url': None,
@@ -112,10 +138,16 @@ def get_player_vlr_kill_averages(player_name):
         'soup': None,
         'error': None,
     }
+    
+    if progress_callback:
+        progress_callback('Finding player on VLR.gg...', 0.005)
     url = find_player_url(player_name)
     if not url:
         out['error'] = 'Player not found on VLR.gg'
         return out
+    
+    if progress_callback:
+        progress_callback('Loading player page...', 0.015)
     soup = fetch_soup(url)
     if not soup:
         out['vlr_url'] = url
@@ -131,25 +163,47 @@ def get_player_vlr_kill_averages(player_name):
         out['team_url'] = get_team_url_from_player(url)
     except Exception:
         pass
+    
+    if progress_callback:
+        progress_callback('Scraping match history...', 0.03)
     links = scrape_match_links(url)
     if not links:
         out['error'] = 'No match history found'
         out['links_found'] = 0
         out['all_maps_count'] = 0
         return out
+    
+    links_to_check = links[:MAX_MATCHES]
+    total_matches = len(links_to_check)
+    
+    if progress_callback:
+        progress_callback(f'Analyzing {total_matches} recent matches...', 0.05)
     all_maps = []
-    for link in links[:MAX_MATCHES]:
+    for idx, link in enumerate(links_to_check, 1):
+        if progress_callback:
+            # Parsing is ~95% of the time; map match progress into 0.05 -> 0.95
+            if total_matches:
+                match_fraction = idx / total_matches
+                match_progress = 0.05 + (0.90 * match_fraction)
+            else:
+                match_progress = 0.05
+            progress_callback(f'Parsing match {idx}/{total_matches}...', match_progress)
         try:
             maps = parse_match_page(link, player_name)
             all_maps.extend(maps)
         except Exception:
             continue
+    
     out['links_found'] = len(links)
     out['all_maps_count'] = len(all_maps)
+    
+    if progress_callback:
+        progress_callback('Calculating averages...', 0.99)
     good_matches = group_kills_by_match(all_maps, player_name, max_maps=2)
     if not good_matches:
         out['error'] = 'No valid matches found (need matches with exactly 2 maps)'
         return out
+    
     avgs = compute_averages(good_matches)
     out['avg_last_5'] = avgs[5]
     out['avg_last_10'] = avgs[10]
@@ -195,23 +249,72 @@ def health():
     return jsonify({'status': 'ok', 'service': 'valorant-pickem-analyzer'})
 
 @app.route('/api/progress/<job_id>')
-@limiter.exempt  # Progress polling needs to be frequent, don't rate limit it
-def get_progress_endpoint(job_id):
-    """Get progress for a job"""
-    progress = get_progress(job_id)
-    if not progress:
-        return jsonify({'error': 'Job not found'}), 404
-    response = {
-        'status': progress['status'],
-        'current': progress['current'],
-        'total': progress['total'],
-        'details': progress['details'],
-        'progress_pct': round((progress['current'] / progress['total']) * 100) if progress['total'] > 0 else 0
-    }
-    # Include result if complete
-    if progress['status'] == 'complete' and 'result' in progress:
-        response['result'] = progress['result']
-    return jsonify(response)
+@limiter.exempt  # SSE streaming needs to be exempt from rate limiting
+def stream_progress(job_id):
+    """Stream progress updates via Server-Sent Events (SSE) - real-time updates"""
+    def generate():
+        # Get or create queue for this connection
+        with progress_lock:
+            if job_id not in progress_queues:
+                progress_queues[job_id] = queue.Queue(maxsize=50)
+            q = progress_queues[job_id]
+        
+        # Send initial progress if available
+        initial = get_progress(job_id)
+        if initial:
+            data = {
+                'status': initial['status'],
+                'current': initial['current'],
+                'total': initial['total'],
+                'details': initial['details'],
+                'progress_pct': round((initial['current'] / initial['total']) * 100) if initial['total'] > 0 else 0
+            }
+            if initial['status'] == 'complete' and 'result' in initial:
+                data['result'] = initial['result']
+            yield f"data: {json.dumps(data)}\n\n"
+        
+        # Stream updates from queue
+        try:
+            while True:
+                try:
+                    # Wait for update with timeout
+                    progress_data = q.get(timeout=30)
+                    
+                    data = {
+                        'status': progress_data['status'],
+                        'current': progress_data['current'],
+                        'total': progress_data['total'],
+                        'details': progress_data['details'],
+                        'progress_pct': round((progress_data['current'] / progress_data['total']) * 100) if progress_data['total'] > 0 else 0
+                    }
+                    if progress_data['status'] == 'complete' and 'result' in progress_data:
+                        data['result'] = progress_data['result']
+                    
+                    yield f"data: {json.dumps(data)}\n\n"
+                    
+                    # Close connection if complete or error
+                    if progress_data['status'] in ('complete', 'error'):
+                        break
+                        
+                except queue.Empty:
+                    # Send keepalive to keep connection alive
+                    yield ": keepalive\n\n"
+                    time.sleep(1)  # Wait 1 second before checking queue again
+        finally:
+            # Clean up queue when connection closes
+            with progress_lock:
+                if job_id in progress_queues:
+                    try:
+                        # Drain queue
+                        while True:
+                            progress_queues[job_id].get_nowait()
+                    except queue.Empty:
+                        pass
+    
+    return Response(stream_with_context(generate()), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no'  # Disable nginx buffering
+    })
 
 @app.route('/api/slate', methods=['GET'])
 @limiter.limit("10 per minute")  # Limit to 10 requests per minute per IP
@@ -437,18 +540,35 @@ def get_slate():
                 results = []
                 for idx, player_data in enumerate(player_info, 1):
                     player = player_data['player']
-                    # Show one clear message per player
-                    update_progress(job_id, 'loading', idx, total_players, [
-                        f'Processing {player} ({idx}/{total_players})...'
-                    ])
                     line = player_data['line']
                     # Use team from Underdog API (never guess/scrape from VLR)
                     team_from_underdog = player_data.get('team')
                     team_id_from_underdog = player_data.get('team_id')  # Store team_id for reliable matching
                     player_id_from_underdog = player_data.get('player_id')  # Store player_id for reliable lookup
                     
+                    # Progress callback to update details during VLR scraping
+                    # Use idx-1 for progress since we're starting this player, not finishing it
+                    def make_progress_callback(player_name, player_idx):
+                        def progress_callback(message, match_progress):
+                            # Base progress: completed players
+                            completed = player_idx - 1
+                            # If we have match-level progress, add fractional progress for the current player
+                            if isinstance(match_progress, (int, float)):
+                                current = completed + max(0.0, min(1.0, float(match_progress)))
+                            else:
+                                current = completed
+                            update_progress(job_id, 'loading', current, total_players, [
+                                f'Processing {player_name} ({player_idx}/{total_players})... {message}'
+                            ])
+                        return progress_callback
+                    
+                    # Update progress when starting this player (idx-1 completed)
+                    update_progress(job_id, 'loading', idx - 1, total_players, [
+                        f'Processing {player} ({idx}/{total_players})...'
+                    ])
+                    
                     try:
-                        r = get_player_vlr_kill_averages(player)
+                        r = get_player_vlr_kill_averages(player, progress_callback=make_progress_callback(player, idx))
                         row = {
                             'player': player,
                             'line': line,
@@ -469,6 +589,10 @@ def get_slate():
                         else:
                             row['matches_analyzed'] = len(r['good_matches'])
                         results.append(row)
+                        # Update progress when this player is complete
+                        update_progress(job_id, 'loading', idx, total_players, [
+                            f'Completed {player} ({idx}/{total_players})'
+                        ])
                     except Exception:
                         # Extract a more user-friendly error message
                         error_msg = "Error fetching player stats"

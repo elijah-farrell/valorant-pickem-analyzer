@@ -89,39 +89,54 @@ function updateProgress(current, total, details) {
 
 function startProgressPolling(jobId) {
     currentJobId = jobId;
-    progressPollInterval = setInterval(async () => {
+    
+    // Use Server-Sent Events for real-time updates
+    const eventSource = new EventSource(`${API_BASE}/progress/${jobId}`);
+    
+    eventSource.onmessage = (event) => {
         try {
-            const response = await fetch(`${API_BASE}/progress/${jobId}`);
-            if (response.ok) {
-                const progress = await response.json();
-                updateProgress(progress.current, progress.total, progress.details);
-                
-                if (progress.status === 'complete') {
-                    stopProgressPolling();
-                    // Display the result
-                    if (progress.result) {
-                        displaySlate(progress.result);
-                    } else {
-                        showError('Processing complete but no data received');
-                    }
-                } else if (progress.status === 'error') {
-                    stopProgressPolling();
-                    showError(progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing');
-                }
-            } else if (response.status === 404) {
-                // Job not found - might have expired, stop polling
+            const progress = JSON.parse(event.data);
+            updateProgress(progress.current, progress.total, progress.details);
+            
+            if (progress.status === 'complete') {
+                eventSource.close();
                 stopProgressPolling();
-                showError('Progress tracking expired. Please try again.');
+                // Display the result
+                if (progress.result) {
+                    displaySlate(progress.result);
+                } else {
+                    showError('Processing complete but no data received');
+                }
+            } else if (progress.status === 'error') {
+                eventSource.close();
+                stopProgressPolling();
+                showError(progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing');
             }
         } catch (error) {
             // Silently fail - progress is optional
         }
-    }, 2000); // Poll every 2 seconds - each player takes 3-5+ seconds anyway, so this is plenty responsive
+    };
+    
+    eventSource.onerror = (error) => {
+        // Don't close on first error - might be temporary
+        // Only close if connection is actually closed
+        if (eventSource.readyState === EventSource.CLOSED) {
+            eventSource.close();
+            stopProgressPolling();
+        }
+    };
+    
+    // Store event source for cleanup
+    progressPollInterval = eventSource;
 }
 
 function stopProgressPolling() {
     if (progressPollInterval) {
-        clearInterval(progressPollInterval);
+        if (progressPollInterval.close) {
+            progressPollInterval.close(); // EventSource
+        } else {
+            clearInterval(progressPollInterval); // Fallback for interval
+        }
         progressPollInterval = null;
     }
     currentJobId = null;
