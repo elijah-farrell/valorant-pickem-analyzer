@@ -1,4 +1,9 @@
+"""VLR.gg scraping utilities."""
+# pylint: disable=broad-exception-caught,line-too-long,missing-function-docstring,trailing-whitespace
+
 from datetime import datetime
+import re
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,7 +37,7 @@ def fetch_soup(url: str):
 
 def find_player_url(player_name: str):
     search_url = f"{BASE_URL}/search/?q={player_name}&type=players"
-    res = requests.get(search_url, headers=HEADERS)
+    res = requests.get(search_url, headers=HEADERS, timeout=15)
     if not res.ok:
         print(f"Failed to search for {player_name}")
         return None
@@ -149,8 +154,6 @@ def get_match_from_team(team_url):
     # Look for upcoming matches section on team page
     # VLR team pages have upcoming matches listed first
     # Check for "upcoming" or "next" match sections
-    upcoming_sections = soup.select(".wf-module, .upcoming-matches, [class*='upcoming'], [class*='next']")
-    
     # Also check all links for match URLs, but prioritize upcoming sections
     all_links = soup.select("a[href]")
     for link in all_links:
@@ -169,14 +172,13 @@ def get_match_from_team(team_url):
         elif href.startswith('http') and 'vlr.gg' in href:
             # Check if it's a match URL
             try:
-                from urllib.parse import urlparse
                 parsed = urlparse(href)
                 path = parsed.path.strip('/')
                 parts = path.split('/')
                 if len(parts) > 0 and parts[0].isdigit() and len(parts[0]) >= 4:
                     if href not in match_urls:
                         match_urls.append(href)
-            except:
+            except Exception:
                 pass
     
     # Filter for only upcoming matches and return just the first one
@@ -211,16 +213,15 @@ def get_match_from_team(team_url):
                     upcoming_matches.append(match_url)
                     # Return the first upcoming match found (the next game)
                     return [match_url]
-            except:
+            except Exception:
                 # If date parsing fails, check if match page shows it's upcoming
                 # Look for indicators like "TBD", "Upcoming", or no completed stats
-                match_title = get_match_title(match_soup)
                 # If match has no completed stats, it's likely upcoming
                 stats_tables = match_soup.select("table.wf-table-inset, table.wf-table")
                 if not stats_tables or len(stats_tables) == 0:
                     # No stats = likely upcoming match
                     return [match_url]
-        except Exception as e:
+        except Exception:
             continue
     
     # If we found upcoming matches, return the first one
@@ -312,7 +313,7 @@ def scrape_agent_stats_by_timespan(player_url: str):
                 kast_str = stats["KAST"].replace("%", "")
                 try:
                     total["KAST"].append(float(kast_str))
-                except:
+                except Exception:
                     pass
 
             agent_stats["Overall"] = {
@@ -375,7 +376,6 @@ def scrape_match_links(player_url):
             # Full URL - check if it's a match URL
             # Extract the path part
             try:
-                from urllib.parse import urlparse
                 parsed = urlparse(href)
                 path = parsed.path.strip('/')
                 parts = path.split('/')
@@ -385,7 +385,7 @@ def scrape_match_links(player_url):
                     if first_part.isdigit() and len(first_part) >= 4:
                         if href not in match_links:
                             match_links.append(href)
-            except:
+            except Exception:
                 pass
     
     if match_links:
@@ -504,7 +504,7 @@ def scrape_match_links(player_url):
     
     # Check for script tags that might contain match data (JSON/API responses)
     scripts = soup.select("script")
-    for i, script in enumerate(scripts):
+    for script in scripts:
         if script.string:
             content = script.string
             # Look for JSON data or API endpoints
@@ -512,7 +512,6 @@ def scrape_match_links(player_url):
                 # Check if it contains JSON-like data
                 if '{' in content and ('match' in content.lower() or 'id' in content.lower()):
                     # Try to find URLs or IDs in the script
-                    import re
                     # Look for match URLs
                     match_urls = re.findall(r'["\']([^"\']*match[^"\']*)["\']', content, re.IGNORECASE)
                     if match_urls:
@@ -522,14 +521,10 @@ def scrape_match_links(player_url):
                     if match_ids:
                         pass  # Could use IDs here if needed
     
-    # Check page structure - maybe matches are in a different format
-    # Look for common match container classes
-    match_containers = soup.select("[class*='match'], [class*='game'], [class*='event']")
-    
     # Check if matches are in data attributes
     for elem in data_elements[:10]:  # Check first 10
         attrs = elem.attrs
-        for key, value in attrs.items():
+        for key in attrs:
             if 'match' in key.lower() or 'game' in key.lower():
                 pass  # Could extract match data here if needed
     return match_links
@@ -564,7 +559,7 @@ def get_match_date(soup):
                     else:
                         dt = datetime.strptime(raw, "%Y-%m-%d")
                         return dt.strftime("%Y-%m-%d")
-                except:
+                except Exception:
                     pass
             
             # Try text content
@@ -634,10 +629,8 @@ def find_match_urls_for_teams(team_list, max_matches_per_pair=3):
     # Group teams into pairs (most common: 2 teams playing each other)
     if len(team_list) >= 2:
         # Try all pairs
-        for i in range(len(team_list)):
-            for j in range(i + 1, len(team_list)):
-                team1 = team_list[i]
-                team2 = team_list[j]
+        for i, team1 in enumerate(team_list):
+            for team2 in team_list[i + 1:]:
                 matches = find_matches_between_teams(team1, team2, limit=max_matches_per_pair)
                 for match_url in matches:
                     if match_url not in match_urls:
@@ -874,13 +867,13 @@ def parse_match_page(match_url, player_name):
                         try:
                             kills = int(both.text.strip())
                             break
-                        except:
+                        except Exception:
                             pass
                     # Try direct text
                     try:
                         kills = int(kills_cell.text.strip())
                         break
-                    except:
+                    except Exception:
                         pass
 
             maps_data.append({

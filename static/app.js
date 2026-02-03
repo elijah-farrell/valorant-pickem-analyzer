@@ -25,25 +25,47 @@ const VALORANT_MESSAGES = [
 let messageInterval = null;
 let progressPollInterval = null;
 let currentJobId = null;
+let loadingTimeoutId = null;
+let lastProgressDetail = '';  // So we can show "last step" when something fails
+
+const FETCH_TIMEOUT_MS = 60000;   // 60s for initial /api/slate
+const MAX_LOADING_MS = 5 * 60 * 1000;  // 5 min max before we show "taking too long"
+const SSE_STALL_MS = 45000;  // If no SSE message for this long after an error, treat as connection lost
 
 function showLoading() {
+    lastProgressDetail = '';
     document.getElementById('loading').classList.remove('hidden');
     document.getElementById('error').classList.add('hidden');
     document.getElementById('results').innerHTML = '';
     document.getElementById('loadingDetails').classList.add('hidden');
     document.getElementById('toggleDetails').textContent = 'Show Details';
-    // Disable buttons during loading
     document.getElementById('loadSlate').disabled = true;
     document.getElementById('searchPlayer').disabled = true;
-    
-    // Start rotating Valorant messages
     startMessageRotation();
     updateProgress(0, 0, []);
+    // Stop any existing max-loading timeout
+    if (loadingTimeoutId) {
+        clearTimeout(loadingTimeoutId);
+        loadingTimeoutId = null;
+    }
+    loadingTimeoutId = setTimeout(() => {
+        loadingTimeoutId = null;
+        stopMessageRotation();
+        stopProgressPolling();
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('loadSlate').disabled = false;
+        document.getElementById('searchPlayer').disabled = false;
+        const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}` : '';
+        showError(`This is taking longer than usual (stopped after 5 min).${detail} The slate may be large or the server is busy. Please try again.`);
+    }, MAX_LOADING_MS);
 }
 
 function hideLoading() {
+    if (loadingTimeoutId) {
+        clearTimeout(loadingTimeoutId);
+        loadingTimeoutId = null;
+    }
     document.getElementById('loading').classList.add('hidden');
-    // Stop message rotation and progress polling
     stopMessageRotation();
     stopProgressPolling();
     // Re-enable buttons
@@ -75,58 +97,84 @@ function updateProgress(current, total, details) {
     const progressFill = document.getElementById('progressFill');
     const progressText = document.getElementById('progressText');
     const progressDetails = document.getElementById('progressDetails');
-    
     const percent = total > 0 ? Math.round((current / total) * 100) : 0;
     progressFill.style.width = `${percent}%`;
     progressText.textContent = `${percent}%`;
-    
-    // Update details - show only the most recent/last detail
     if (details && details.length > 0) {
-        const latestDetail = details[details.length - 1]; // Get the last/most recent detail
-        progressDetails.innerHTML = `<div class="detail-item">${latestDetail}</div>`;
+        const latestDetail = details[details.length - 1];
+        lastProgressDetail = latestDetail;
+        progressDetails.innerHTML = `<div class="detail-item">${escapeHtml(latestDetail)}</div>`;
     }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function startProgressPolling(jobId) {
     currentJobId = jobId;
-    
-    // Use Server-Sent Events for real-time updates
+    let sseStallTimer = null;
+
     const eventSource = new EventSource(`${API_BASE}/progress/${jobId}`);
-    
+
+    function clearStallTimer() {
+        if (sseStallTimer) {
+            clearTimeout(sseStallTimer);
+            sseStallTimer = null;
+        }
+    }
+
+    function showConnectionLost() {
+        clearStallTimer();
+        if (eventSource.readyState !== EventSource.CLOSED) {
+            eventSource.close();
+        }
+        stopProgressPolling();
+        const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
+        showError(`Connection to server lost (no response for a while).${detail} The server may have restarted or the network dropped. Please try again.`);
+    }
+
     eventSource.onmessage = (event) => {
+        clearStallTimer();
         try {
             const progress = JSON.parse(event.data);
             updateProgress(progress.current, progress.total, progress.details);
-            
+
             if (progress.status === 'complete') {
                 eventSource.close();
                 stopProgressPolling();
-                // Display the result
                 if (progress.result) {
                     displaySlate(progress.result);
                 } else {
-                    showError('Processing complete but no data received');
+                    showError('Processing complete but no data received. Please try again.');
                 }
             } else if (progress.status === 'error') {
                 eventSource.close();
                 stopProgressPolling();
-                showError(progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing');
+                const msg = progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing.';
+                showError(msg + ' Please try again.');
             }
-        } catch (error) {
-            // Silently fail - progress is optional
+        } catch (err) {
+            // Ignore parse errors for optional progress
         }
     };
-    
-    eventSource.onerror = (error) => {
-        // Don't close on first error - might be temporary
-        // Only close if connection is actually closed
+
+    eventSource.onerror = () => {
         if (eventSource.readyState === EventSource.CLOSED) {
-            eventSource.close();
+            clearStallTimer();
             stopProgressPolling();
+            const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
+            showError(`Connection closed unexpectedly.${detail} Please try again.`);
+            return;
+        }
+        // Connection may be reconnecting; if we get no message for SSE_STALL_MS, treat as lost
+        if (!sseStallTimer) {
+            sseStallTimer = setTimeout(showConnectionLost, SSE_STALL_MS);
         }
     };
-    
-    // Store event source for cleanup
+
     progressPollInterval = eventSource;
 }
 
@@ -144,7 +192,8 @@ function stopProgressPolling() {
 
 function showError(message) {
     const errorDiv = document.getElementById('error');
-    errorDiv.textContent = message;
+    const m = message.trim();
+    errorDiv.textContent = m + (m.endsWith('.') ? '' : '.') + ' You can try again or refresh the page.';
     errorDiv.classList.remove('hidden');
     hideLoading();
 }
@@ -410,34 +459,44 @@ async function loadSlate() {
     if (!confirmClearData('load slate')) {
         return; // User cancelled
     }
-    
     showLoading();
     updateProgress(0, 1, ['Connecting to Underdog API...']);
-    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-        const response = await fetch(`${API_BASE}/slate`);
-        const data = await response.json();
-        
+        const response = await fetch(`${API_BASE}/slate`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        let data;
+        try {
+            data = await response.json();
+        } catch (parseErr) {
+            throw new Error('Invalid response from server (not JSON). Server may be down or restarting.');
+        }
         if (!response.ok) {
             const errorMsg = data.error || data.details || `HTTP error! status: ${response.status}`;
             throw new Error(errorMsg);
         }
-        
         if (data.error && !data.message) {
             throw new Error(data.error);
         }
-        
-        // If we got a job_id, poll for progress and result
         if (data.job_id) {
             startProgressPolling(data.job_id);
         } else if (data.players) {
-            // Fallback: if we got data directly (no job_id), display it
             displaySlate(data);
         } else {
             throw new Error('No data received');
         }
     } catch (error) {
-        showError(`Failed to load slate: ${error.message}`);
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            showError('Request timed out (60s). The server may be slow or the slate is large. Please try again.');
+        } else if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
+            showError('Network error: could not reach the server. Check your connection or try again later. The server may be starting up.');
+        } else if (error.message && error.message.includes('JSON')) {
+            showError('Server returned an invalid response. The server may be misconfigured or restarting. Please try again.');
+        } else {
+            showError(`Failed to load slate: ${error.message || 'Unknown error'}. Please try again.`);
+        }
     }
 }
 
