@@ -25,11 +25,9 @@ const VALORANT_MESSAGES = [
 let messageInterval = null;
 let progressPollInterval = null;
 let currentJobId = null;
-let loadingTimeoutId = null;
 let lastProgressDetail = '';  // So we can show "last step" when something fails
 
-const FETCH_TIMEOUT_MS = 60000;   // 60s for initial /api/slate
-const MAX_LOADING_MS = 5 * 60 * 1000;  // 5 min max before we show "taking too long"
+const FETCH_TIMEOUT_MS = 60000;   // 60s for initial /api/slate (job_id response only)
 const SSE_STALL_MS = 45000;  // If no SSE message for this long after an error, treat as connection lost
 
 function showLoading() {
@@ -43,28 +41,9 @@ function showLoading() {
     document.getElementById('searchPlayer').disabled = true;
     startMessageRotation();
     updateProgress(0, 0, []);
-    // Stop any existing max-loading timeout
-    if (loadingTimeoutId) {
-        clearTimeout(loadingTimeoutId);
-        loadingTimeoutId = null;
-    }
-    loadingTimeoutId = setTimeout(() => {
-        loadingTimeoutId = null;
-        stopMessageRotation();
-        stopProgressPolling();
-        document.getElementById('loading').classList.add('hidden');
-        document.getElementById('loadSlate').disabled = false;
-        document.getElementById('searchPlayer').disabled = false;
-        const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}` : '';
-        showError(`This is taking longer than usual (stopped after 5 min).${detail} The slate may be large or the server is busy. Please try again.`);
-    }, MAX_LOADING_MS);
 }
 
 function hideLoading() {
-    if (loadingTimeoutId) {
-        clearTimeout(loadingTimeoutId);
-        loadingTimeoutId = null;
-    }
     document.getElementById('loading').classList.add('hidden');
     stopMessageRotation();
     stopProgressPolling();

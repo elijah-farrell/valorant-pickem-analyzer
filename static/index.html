@@ -45,11 +45,12 @@
     </div>
 
     <script>
-        // API URL - auto-detects environment
+        // API URL - local dev uses same origin (Flask serves static + API); production uses Render
         const hostname = window.location.hostname;
-        window.API_BASE_URL = (hostname.includes('vercel.app') || hostname.includes('localhost') === false)
-            ? 'https://valorant-pickem-analyzer.onrender.com/api'  // Production
-            : 'http://localhost:5000/api';  // Local dev
+        const isLocalDev = hostname === 'localhost' || hostname === '127.0.0.1';
+        window.API_BASE_URL = isLocalDev
+            ? window.location.origin + '/api'
+            : 'https://valorant-pickem-analyzer.onrender.com/api';
     </script>
     <script src="/app.js"></script>
 </body>
