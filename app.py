@@ -14,8 +14,8 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-from scraper.underdog import get_pickem_slate
-from scraper.vlr import (
+from clients.underdog import get_pickem_slate
+from scrapers.vlr import (
     find_player_url,
     scrape_current_team,
     scrape_player_name,

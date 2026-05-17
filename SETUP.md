@@ -10,7 +10,8 @@ Instructions for running the Valorant Pick'em Analyzer locally and deploying it.
 |-------|------|
 | **`static/`** | Frontend (HTML, JS, CSS) — Vercel in production |
 | **`app.py`** | Flask API — Gunicorn on Render in production |
-| **`scraper/`** | Underdog API + VLR.gg scraping |
+| **`clients/`** | Underdog Fantasy API |
+| **`scrapers/`** | VLR.gg HTML scraping |
 | **`.venv/`** | Local virtual environment (not committed) |
 
 **Local:** One process (`python app.py`) serves the UI and API at `http://127.0.0.1:5000` (or `localhost`).
@@ -100,8 +101,9 @@ valorant-pickem-analyzer/
 │   ├── index.html
 │   ├── app.js
 │   └── styles.css
-├── scraper/
-│   ├── underdog.py
+├── clients/
+│   └── underdog.py
+├── scrapers/
 │   └── vlr.py
 └── .venv/                 # Local only — create with python -m venv .venv
 ```
