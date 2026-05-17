@@ -142,12 +142,12 @@ Configure everything in the [Render dashboard](https://dashboard.render.com)
    |-----|--------|
    | `FLASK_ENV` | `production` |
    | `ALLOWED_ORIGINS` | Your Vercel URL(s), comma-separated, e.g. `https://your-app.vercel.app,https://your-app-git-main.vercel.app` |
-   | `MAX_MATCHES` | `15` (optional — fewer VLR pages per player so slate finishes before Render restarts; default is `40`) |
+   | `MAX_MATCHES` | Optional — VLR match pages checked per player (default `40`). Lower only if jobs time out or restart mid-slate. |
 4. **Save** and deploy.
 
 After deploy, logs should show **gunicorn** listening — not `Debug mode: on` or `Restarting with stat` (those mean the start command is still `python app.py`).
 
-**Free tier:** Service may spin down or restart during long jobs (~15+ min). The Vercel site uses **HTTP polling** for progress on Render (not long-lived SSE). For reliable full slates, run locally. On Render, set `MAX_MATCHES=15` to finish faster.
+**Free tier:** Jobs can take **15–20+ minutes** for a full slate. The Vercel frontend uses **HTTP polling** on Render (not long-lived SSE), which avoids the progress stream dying mid-job. Full slates with the default `MAX_MATCHES=40` can complete on Render; if a job is lost (404 on poll, usually after a restart), run again or lower `MAX_MATCHES`. Local dev is still the most reliable option.
 
 ### Frontend (Vercel)
 

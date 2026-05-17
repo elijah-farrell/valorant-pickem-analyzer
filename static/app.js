@@ -122,7 +122,7 @@ function startProgressHttpPolling(jobId) {
                 const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
                 showError(
                     `Server restarted or job was lost before finishing.${detail} ` +
-                    'Full slates take 15+ minutes on free hosting — try locally, or set MAX_MATCHES=15 on Render to finish faster.'
+                    'Full slates take 15+ minutes on free hosting — try again, or run locally if the server restarted mid-job.'
                 );
                 return;
             }
