@@ -27,7 +27,7 @@ let progressPollInterval = null;
 let currentJobId = null;
 let lastProgressDetail = '';  // So we can show "last step" when something fails
 
-const FETCH_TIMEOUT_MS = 60000;   // 60s for initial /api/slate (job_id response only)
+const FETCH_TIMEOUT_MS = API_BASE.includes('onrender.com') ? 120000 : 60000;  // Render cold start can be slow
 const SSE_STALL_MS = 45000;  // If no SSE message for this long after an error, treat as connection lost
 
 function showLoading() {

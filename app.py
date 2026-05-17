@@ -702,8 +702,18 @@ def get_player_stats(player_name):
     except Exception:
         return jsonify({'error': 'Unable to fetch player stats. Please try again later.'}), 500
 
+def _is_production_runtime():
+    """True on Render/production hosts. Local `python app.py` stays in dev mode."""
+    if os.environ.get('FLASK_ENV', '').lower() == 'production':
+        return True
+    if os.environ.get('RENDER', '').lower() in ('true', '1', 'yes'):
+        return True
+    return bool(os.environ.get('ALLOWED_ORIGINS', '').strip())
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_ENV') != 'production'
-    app.run(debug=debug, host='0.0.0.0', port=port)
+    prod = _is_production_runtime()
+    # Production on Render must use gunicorn (set in Render dashboard). This block is local dev only.
+    app.run(debug=not prod, use_reloader=not prod, host='0.0.0.0', port=port)
 
