@@ -121,8 +121,8 @@ function startProgressHttpPolling(jobId) {
                 stopProgressPolling();
                 const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
                 showError(
-                    `Server restarted or job was lost before finishing.${detail} ` +
-                    'Full slates take 15+ minutes on free hosting — try again, or run locally if the server restarted mid-job.'
+                    `Job progress was lost (the server may have restarted).${detail} ` +
+                    'Try loading the slate again and keep this tab open until it finishes.'
                 );
                 return;
             }
@@ -151,7 +151,7 @@ function startProgressHttpPolling(jobId) {
 }
 
 function startProgressPolling(jobId) {
-    // Render/proxies often drop long-lived SSE (~15 min); short poll requests work better
+    // Render/proxies often drop long-lived SSE; short poll requests work better on long jobs
     if (API_BASE.includes('onrender.com')) {
         startProgressHttpPolling(jobId);
         return;

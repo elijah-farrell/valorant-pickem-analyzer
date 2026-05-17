@@ -83,7 +83,7 @@ Open **http://127.0.0.1:5000** or **http://localhost:5000** (both work; the fron
 
 ### 3. What to expect
 
-- **Load Underdog Slate** can take **10–20+ minutes** (many players × VLR match pages). Progress updates stream over SSE; let it finish.
+- **Load Underdog Slate** time depends on slate size (player count × VLR pages per player). A ~20-player slate can take **30+ minutes to an hour or more** — watch the progress bar and let it finish. Locally, progress streams over SSE; on Render, the site polls for status.
 - **Search player** is faster (single player).
 
 ---
@@ -147,7 +147,7 @@ Configure everything in the [Render dashboard](https://dashboard.render.com)
 
 After deploy, logs should show **gunicorn** listening — not `Debug mode: on` or `Restarting with stat` (those mean the start command is still `python app.py`).
 
-**Free tier:** Jobs can take **15–20+ minutes** for a full slate. The Vercel frontend uses **HTTP polling** on Render (not long-lived SSE), which avoids the progress stream dying mid-job. Full slates with the default `MAX_MATCHES=40` can complete on Render; if a job is lost (404 on poll, usually after a restart), run again or lower `MAX_MATCHES`. Local dev is still the most reliable option.
+**Free tier:** Runtime scales with slate size — there is no fixed duration. The Vercel frontend uses **HTTP polling** on Render (not long-lived SSE), which keeps progress updates working on long jobs. Full slates with the default `MAX_MATCHES=40` can complete on Render; if a job is lost (404 on poll, usually after a restart), run again or lower `MAX_MATCHES`.
 
 ### Frontend (Vercel)
 
@@ -178,7 +178,7 @@ Open a **new** terminal, or refresh PATH (see Windows section above). Use `where
 Use local dev only against your local Flask server (`python app.py`). Production API is for the Vercel site; local uses `window.location.origin + '/api'`.
 
 **Slate stuck loading / connection lost**  
-Large slates take a long time. If the progress stream drops (common on free Render), retry or run locally. Check the red error box on the page for the last step seen.
+Large slates take a long time (often **30+ minutes to an hour+** for ~20 players, depending on VLR response times). If progress stops or you get a 404 on poll (server restarted), run the slate again. Check the red error box for the last step seen.
 
 **Port 5000 in use**  
 ```powershell
