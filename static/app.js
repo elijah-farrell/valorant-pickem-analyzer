@@ -92,10 +92,73 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function applyProgressPayload(progress) {
+    updateProgress(progress.current, progress.total, progress.details);
+    if (progress.status === 'complete') {
+        stopProgressPolling();
+        if (progress.result) {
+            displaySlate(progress.result);
+        } else {
+            showError('Processing complete but no data received. Please try again.');
+        }
+    } else if (progress.status === 'error') {
+        stopProgressPolling();
+        const msg = progress.details && progress.details.length > 0
+            ? progress.details[0]
+            : 'An error occurred during processing.';
+        showError(msg + ' Please try again.');
+    }
+}
+
+function startProgressHttpPolling(jobId) {
+    currentJobId = jobId;
+    let pollFailCount = 0;
+
+    async function pollOnce() {
+        try {
+            const response = await fetch(`${API_BASE}/progress/${jobId}/status`);
+            if (response.status === 404) {
+                stopProgressPolling();
+                const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
+                showError(
+                    `Server restarted or job was lost before finishing.${detail} ` +
+                    'Full slates take 15+ minutes on free hosting — try locally, or set MAX_MATCHES=15 on Render to finish faster.'
+                );
+                return;
+            }
+            if (!response.ok) {
+                pollFailCount += 1;
+                if (pollFailCount >= 5) {
+                    stopProgressPolling();
+                    showError(`Lost contact with server (HTTP ${response.status}). Please try again.`);
+                }
+                return;
+            }
+            pollFailCount = 0;
+            const progress = await response.json();
+            applyProgressPayload(progress);
+        } catch (err) {
+            pollFailCount += 1;
+            if (pollFailCount >= 5) {
+                stopProgressPolling();
+                showError(`Lost contact with server: ${err.message || 'network error'}. Please try again.`);
+            }
+        }
+    }
+
+    pollOnce();
+    progressPollInterval = setInterval(pollOnce, 2000);
+}
+
 function startProgressPolling(jobId) {
+    // Render/proxies often drop long-lived SSE (~15 min); short poll requests work better
+    if (API_BASE.includes('onrender.com')) {
+        startProgressHttpPolling(jobId);
+        return;
+    }
+
     currentJobId = jobId;
     let sseStallTimer = null;
-
     const eventSource = new EventSource(`${API_BASE}/progress/${jobId}`);
 
     function clearStallTimer() {
@@ -111,30 +174,13 @@ function startProgressPolling(jobId) {
             eventSource.close();
         }
         stopProgressPolling();
-        const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
-        showError(`Connection to server lost (no response for a while).${detail} The server may have restarted or the network dropped. Please try again.`);
+        startProgressHttpPolling(jobId);
     }
 
     eventSource.onmessage = (event) => {
         clearStallTimer();
         try {
-            const progress = JSON.parse(event.data);
-            updateProgress(progress.current, progress.total, progress.details);
-
-            if (progress.status === 'complete') {
-                eventSource.close();
-                stopProgressPolling();
-                if (progress.result) {
-                    displaySlate(progress.result);
-                } else {
-                    showError('Processing complete but no data received. Please try again.');
-                }
-            } else if (progress.status === 'error') {
-                eventSource.close();
-                stopProgressPolling();
-                const msg = progress.details && progress.details.length > 0 ? progress.details[0] : 'An error occurred during processing.';
-                showError(msg + ' Please try again.');
-            }
+            applyProgressPayload(JSON.parse(event.data));
         } catch (err) {
             // Ignore parse errors for optional progress
         }
@@ -144,11 +190,9 @@ function startProgressPolling(jobId) {
         if (eventSource.readyState === EventSource.CLOSED) {
             clearStallTimer();
             stopProgressPolling();
-            const detail = lastProgressDetail ? ` Last step: ${lastProgressDetail}.` : '';
-            showError(`Connection closed unexpectedly.${detail} Please try again.`);
+            startProgressHttpPolling(jobId);
             return;
         }
-        // Connection may be reconnecting; if we get no message for SSE_STALL_MS, treat as lost
         if (!sseStallTimer) {
             sseStallTimer = setTimeout(showConnectionLost, SSE_STALL_MS);
         }

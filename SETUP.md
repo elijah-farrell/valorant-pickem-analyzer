@@ -115,7 +115,8 @@ valorant-pickem-analyzer/
 | `GET /` | Frontend (local) or API info (production) |
 | `GET /health` | Health check |
 | `GET /api/slate` | Start slate job; returns `{ "job_id": "..." }` |
-| `GET /api/progress/<job_id>` | SSE progress + final result |
+| `GET /api/progress/<job_id>` | SSE progress (local dev) |
+| `GET /api/progress/<job_id>/status` | Poll progress (production / Render) |
 | `GET /api/player/<name>` | Single-player VLR stats |
 
 ---
@@ -129,21 +130,22 @@ Configure everything in the [Render dashboard](https://dashboard.render.com)
 2. **Settings** (typical values):
    - **Runtime:** Python 3
    - **Build command:** `pip install -r requirements.txt`
-   - **Start command** (required — do **not** use `python app.py`):
+   - **Start command** (required — do **not** use `python app.py`; no leading/trailing spaces):
      ```bash
      gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 0 app:app
      ```
-     `--workers 1` keeps in-memory job progress on one process. `--timeout 0` allows long SSE streams during slate loads.
+     `--workers 1` keeps in-memory job progress on one process. `--timeout 0` allows long requests if needed.
 3. **Environment** tab → add:
    | Key | Value |
    |-----|--------|
    | `FLASK_ENV` | `production` |
    | `ALLOWED_ORIGINS` | Your Vercel URL(s), comma-separated, e.g. `https://your-app.vercel.app,https://your-app-git-main.vercel.app` |
+   | `MAX_MATCHES` | `15` (optional — fewer VLR pages per player so slate finishes before Render restarts; default is `40`) |
 4. **Save** and deploy.
 
 After deploy, logs should show **gunicorn** listening — not `Debug mode: on` or `Restarting with stat` (those mean the start command is still `python app.py`).
 
-**Free tier:** Service spins down when idle; first request can be slow. Full slate loads are heavy — local dev is more reliable.
+**Free tier:** Service may spin down or restart during long jobs (~15+ min). The Vercel site uses **HTTP polling** for progress on Render (not long-lived SSE). For reliable full slates, run locally. On Render, set `MAX_MATCHES=15` to finish faster.
 
 ### Frontend (Vercel)
 

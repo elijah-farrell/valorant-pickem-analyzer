@@ -234,109 +234,83 @@ def get_match_from_team(team_url):
     
     return []
 
-def scrape_agent_stats_by_timespan(player_url: str):
-    timespans = ["30d", "60d", "90d", "all"]
-    stats_by_timespan = {}
-
-    for span in timespans:
-        url = f"{player_url}?timespan={span}"
-        soup = fetch_soup(url)
-        if not soup:
-            continue
-
-        table = soup.find("table", class_="wf-table")
-        if not table:
-            continue
-
-        agent_stats = {}
-        for row in table.select("tbody tr"):
-            cols = row.find_all("td")
-            if len(cols) < 17:
-                continue
-            try:
-                agent_img = cols[0].find("img")
-                agent = agent_img["alt"].capitalize() if agent_img and "alt" in agent_img.attrs else "Unknown"
-                rounds = int(cols[2].text.strip() or "0")
-                rating = float(cols[3].text.strip() or "0")
-                acs = float(cols[4].text.strip() or "0")
-                kd = float(cols[5].text.strip() or "0")
-                adr = float(cols[6].text.strip() or "0")
-                kast = cols[7].text.strip()
-                kpr = float(cols[8].text.strip() or "0")
-                apr = float(cols[9].text.strip() or "0")
-                fkpr = float(cols[10].text.strip() or "0")
-                fdpr = float(cols[11].text.strip() or "0")
-                kills = int(cols[12].text.strip() or "0")
-                deaths = int(cols[13].text.strip() or "0")
-                assists = int(cols[14].text.strip() or "0")
-                fk = int(cols[15].text.strip() or "0")
-                fd = int(cols[16].text.strip() or "0")
-            except Exception:
-                continue
-
-            agent_stats[agent] = {
-                "Rounds": rounds,
-                "Rating": rating,
-                "ACS": acs,
-                "K/D": kd,
-                "ADR": adr,
-                "KAST": kast,
-                "KPR": kpr,
-                "APR": apr,
-                "FKPR": fkpr,
-                "FDPR": fdpr,
-                "Kills": kills,
-                "Deaths": deaths,
-                "Assists": assists,
-                "FK": fk,
-                "FD": fd
-            }
-
-        # Calculate Overall
-        if agent_stats:
-            total = {
-                "Rounds": 0, "Rating": [], "ACS": [], "K/D": 0, "ADR": [], "KAST": [],
-                "KPR": [], "APR": [], "FKPR": [], "FDPR": [],
-                "Kills": 0, "Deaths": 0, "Assists": 0, "FK": 0, "FD": 0
-            }
-            for agent, stats in agent_stats.items():
-                total["Rounds"] += stats["Rounds"]
-                total["Kills"] += stats["Kills"]
-                total["Deaths"] += stats["Deaths"]
-                total["Assists"] += stats["Assists"]
-                total["FK"] += stats["FK"]
-                total["FD"] += stats["FD"]
-
-                for key in ["Rating", "ACS", "ADR", "KPR", "APR", "FKPR", "FDPR"]:
-                    total[key].append(stats[key])
-
-                kast_str = stats["KAST"].replace("%", "")
-                try:
-                    total["KAST"].append(float(kast_str))
-                except Exception:
-                    pass
-
-            agent_stats["Overall"] = {
-                "Rounds": total["Rounds"],
-                "Kills": total["Kills"],
-                "Deaths": total["Deaths"],
-                "Assists": total["Assists"],
-                "FK": total["FK"],
-                "FD": total["FD"],
-                "K/D": round(total["Kills"] / total["Deaths"], 2) if total["Deaths"] else 0,
-                "Rating": round(sum(total["Rating"]) / len(total["Rating"]), 2),
-                "ACS": round(sum(total["ACS"]) / len(total["ACS"]), 2),
-                "ADR": round(sum(total["ADR"]) / len(total["ADR"]), 2),
-                "KAST": f"{round(sum(total['KAST']) / len(total['KAST']))}%" if total["KAST"] else "0%",
-                "KPR": round(sum(total["KPR"]) / len(total["KPR"]), 2),
-                "APR": round(sum(total["APR"]) / len(total["APR"]), 2),
-                "FKPR": round(sum(total["FKPR"]) / len(total["FKPR"]), 2),
-                "FDPR": round(sum(total["FDPR"]) / len(total["FDPR"]), 2),
-            }
-
-        stats_by_timespan[span] = agent_stats
-
-    return stats_by_timespan
+# Unused — not called from app.py or the frontend (4 extra page loads per player).
+# def scrape_agent_stats_by_timespan(player_url: str):
+#     timespans = ["30d", "60d", "90d", "all"]
+#     stats_by_timespan = {}
+#     for span in timespans:
+#         url = f"{player_url}?timespan={span}"
+#         soup = fetch_soup(url)
+#         if not soup:
+#             continue
+#         table = soup.find("table", class_="wf-table")
+#         if not table:
+#             continue
+#         agent_stats = {}
+#         for row in table.select("tbody tr"):
+#             cols = row.find_all("td")
+#             if len(cols) < 17:
+#                 continue
+#             try:
+#                 agent_img = cols[0].find("img")
+#                 agent = agent_img["alt"].capitalize() if agent_img and "alt" in agent_img.attrs else "Unknown"
+#                 rounds = int(cols[2].text.strip() or "0")
+#                 rating = float(cols[3].text.strip() or "0")
+#                 acs = float(cols[4].text.strip() or "0")
+#                 kd = float(cols[5].text.strip() or "0")
+#                 adr = float(cols[6].text.strip() or "0")
+#                 kast = cols[7].text.strip()
+#                 kpr = float(cols[8].text.strip() or "0")
+#                 apr = float(cols[9].text.strip() or "0")
+#                 fkpr = float(cols[10].text.strip() or "0")
+#                 fdpr = float(cols[11].text.strip() or "0")
+#                 kills = int(cols[12].text.strip() or "0")
+#                 deaths = int(cols[13].text.strip() or "0")
+#                 assists = int(cols[14].text.strip() or "0")
+#                 fk = int(cols[15].text.strip() or "0")
+#                 fd = int(cols[16].text.strip() or "0")
+#             except Exception:
+#                 continue
+#             agent_stats[agent] = {
+#                 "Rounds": rounds, "Rating": rating, "ACS": acs, "K/D": kd, "ADR": adr,
+#                 "KAST": kast, "KPR": kpr, "APR": apr, "FKPR": fkpr, "FDPR": fdpr,
+#                 "Kills": kills, "Deaths": deaths, "Assists": assists, "FK": fk, "FD": fd,
+#             }
+#         if agent_stats:
+#             total = {
+#                 "Rounds": 0, "Rating": [], "ACS": [], "K/D": 0, "ADR": [], "KAST": [],
+#                 "KPR": [], "APR": [], "FKPR": [], "FDPR": [],
+#                 "Kills": 0, "Deaths": 0, "Assists": 0, "FK": 0, "FD": 0,
+#             }
+#             for agent, stats in agent_stats.items():
+#                 total["Rounds"] += stats["Rounds"]
+#                 total["Kills"] += stats["Kills"]
+#                 total["Deaths"] += stats["Deaths"]
+#                 total["Assists"] += stats["Assists"]
+#                 total["FK"] += stats["FK"]
+#                 total["FD"] += stats["FD"]
+#                 for key in ["Rating", "ACS", "ADR", "KPR", "APR", "FKPR", "FDPR"]:
+#                     total[key].append(stats[key])
+#                 kast_str = stats["KAST"].replace("%", "")
+#                 try:
+#                     total["KAST"].append(float(kast_str))
+#                 except Exception:
+#                     pass
+#             agent_stats["Overall"] = {
+#                 "Rounds": total["Rounds"], "Kills": total["Kills"], "Deaths": total["Deaths"],
+#                 "Assists": total["Assists"], "FK": total["FK"], "FD": total["FD"],
+#                 "K/D": round(total["Kills"] / total["Deaths"], 2) if total["Deaths"] else 0,
+#                 "Rating": round(sum(total["Rating"]) / len(total["Rating"]), 2),
+#                 "ACS": round(sum(total["ACS"]) / len(total["ACS"]), 2),
+#                 "ADR": round(sum(total["ADR"]) / len(total["ADR"]), 2),
+#                 "KAST": f"{round(sum(total['KAST']) / len(total['KAST']))}%" if total["KAST"] else "0%",
+#                 "KPR": round(sum(total["KPR"]) / len(total["KPR"]), 2),
+#                 "APR": round(sum(total["APR"]) / len(total["APR"]), 2),
+#                 "FKPR": round(sum(total["FKPR"]) / len(total["FKPR"]), 2),
+#                 "FDPR": round(sum(total["FDPR"]) / len(total["FDPR"]), 2),
+#             }
+#         stats_by_timespan[span] = agent_stats
+#     return stats_by_timespan
 
 def scrape_match_links(player_url):
     """Scrape match links from player's match history page"""

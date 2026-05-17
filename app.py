@@ -113,7 +113,24 @@ def ratelimit_handler(e):
         'retry_after': e.description
     }), 429
 
-MAX_MATCHES = 40
+MAX_MATCHES = int(os.environ.get('MAX_MATCHES', '40'))
+
+
+def progress_to_json(progress_data):
+    """Serialize progress for JSON/SSE (no datetime fields)."""
+    if not progress_data:
+        return None
+    data = {
+        'status': progress_data['status'],
+        'current': progress_data['current'],
+        'total': progress_data['total'],
+        'details': progress_data['details'],
+        'progress_pct': round((progress_data['current'] / progress_data['total']) * 100)
+        if progress_data['total'] > 0 else 0,
+    }
+    if progress_data['status'] == 'complete' and 'result' in progress_data:
+        data['result'] = progress_data['result']
+    return data
 
 def compute_averages(good_matches, windows=(5, 10, 25)):
     kills = [m['total_kills'] for m in good_matches]
@@ -265,16 +282,7 @@ def stream_progress(job_id):
         # Send initial progress if available
         initial = get_progress(job_id)
         if initial:
-            data = {
-                'status': initial['status'],
-                'current': initial['current'],
-                'total': initial['total'],
-                'details': initial['details'],
-                'progress_pct': round((initial['current'] / initial['total']) * 100) if initial['total'] > 0 else 0
-            }
-            if initial['status'] == 'complete' and 'result' in initial:
-                data['result'] = initial['result']
-            yield f"data: {json.dumps(data)}\n\n"
+            yield f"data: {json.dumps(progress_to_json(initial))}\n\n"
         
         # Stream updates from queue
         try:
@@ -282,18 +290,7 @@ def stream_progress(job_id):
                 try:
                     # Wait for update with timeout
                     progress_data = q.get(timeout=30)
-                    
-                    data = {
-                        'status': progress_data['status'],
-                        'current': progress_data['current'],
-                        'total': progress_data['total'],
-                        'details': progress_data['details'],
-                        'progress_pct': round((progress_data['current'] / progress_data['total']) * 100) if progress_data['total'] > 0 else 0
-                    }
-                    if progress_data['status'] == 'complete' and 'result' in progress_data:
-                        data['result'] = progress_data['result']
-                    
-                    yield f"data: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps(progress_to_json(progress_data))}\n\n"
                     
                     # Close connection if complete or error
                     if progress_data['status'] in ('complete', 'error'):
@@ -318,6 +315,20 @@ def stream_progress(job_id):
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no'  # Disable nginx buffering
     })
+
+
+@app.route('/api/progress/<job_id>/status', methods=['GET'])
+@limiter.exempt
+def progress_status(job_id):
+    """Poll job progress (short requests — works on Render; avoids long-lived SSE timeouts)."""
+    progress = get_progress(job_id)
+    if not progress:
+        return jsonify({
+            'status': 'unknown',
+            'error': 'Job not found. The server may have restarted during processing.',
+        }), 404
+    return jsonify(progress_to_json(progress))
+
 
 def _parse_slate_response(slate_response):
     """Parse Underdog slate response into player_info and match structures. Runs in background thread."""
