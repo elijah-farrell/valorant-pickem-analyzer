@@ -1,5 +1,4 @@
 """VLR.gg scraping utilities."""
-# pylint: disable=broad-exception-caught,line-too-long,missing-function-docstring,trailing-whitespace
 
 from datetime import datetime
 import re

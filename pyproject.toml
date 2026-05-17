@@ -1,0 +1,21 @@
+[tool.pylint.messages_control]
+# Scraping/API code: broad catches keep one failure from killing the whole slate.
+# Other rules below are style-only noise for this small app.
+disable = [
+    "broad-exception-caught",
+    "missing-module-docstring",
+    "missing-function-docstring",
+    "line-too-long",
+    "trailing-whitespace",
+    "trailing-newlines",
+    "invalid-name",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "too-many-locals",
+    "too-many-branches",
+    "too-many-statements",
+    "no-else-return",
+]
+
+[tool.pylint.format]
+max-line-length = 120

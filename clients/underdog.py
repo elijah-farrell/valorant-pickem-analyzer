@@ -1,3 +1,4 @@
+"""Underdog Fantasy API client."""
 import requests
 
 BASE_URL = "https://api.underdogfantasy.com/v1/over_under_lines?sport_id=val"

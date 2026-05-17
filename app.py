@@ -1,5 +1,4 @@
 """Flask API backend for the Valorant pick'em analyzer."""
-# pylint: disable=broad-exception-caught,line-too-long,invalid-name,missing-function-docstring,trailing-whitespace,trailing-newlines
 
 import os
 import uuid
@@ -516,7 +515,7 @@ def _process_slate_background(job_id, slate_response, match_url):
     try:
         update_progress(job_id, 'loading', 0, 1, ['Parsing Underdog slate...'])
         parsed = _parse_slate_response(slate_response)
-        player_info, match_teams, all_matches_info, match_id_to_game, team_id_to_name, games = parsed
+        player_info, match_teams, all_matches_info, match_id_to_game, _, _ = parsed
         total_players = len(player_info)
         if total_players == 0:
             update_progress(job_id, 'complete', 0, 1, ['No players in slate.'], {
