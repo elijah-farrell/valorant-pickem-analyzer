@@ -1,13 +1,25 @@
 """VLR.gg scraping utilities."""
 
 from datetime import datetime
+import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+logger = logging.getLogger("vlr")
+
 BASE_URL = "https://www.vlr.gg"
+
+_CF_MARKERS = (
+    "just a moment",
+    "cf-browser-verification",
+    "challenge-platform",
+    "attention required",
+    "/cdn-cgi/challenge",
+    "checking your browser",
+)
 
 def normalize_name(name: str) -> str:
     """Normalize player name for comparison - more flexible matching"""
@@ -25,54 +37,225 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 }
 
-def fetch_soup(url: str):
-    """Fetch HTML and parse with BeautifulSoup."""
+def _page_title(soup):
+    tag = soup.find("title") if soup else None
+    return tag.get_text(strip=True) if tag else None
+
+
+def _classify_vlr_response(status, text):
+    blocked = False
+    block_reason = None
+    if status in (401, 403, 429, 503):
+        blocked = True
+        block_reason = f"HTTP {status}"
+    snippet = (text or "")[:12000].lower()
+    for marker in _CF_MARKERS:
+        if marker in snippet:
+            blocked = True
+            if not block_reason:
+                block_reason = "cloudflare_challenge"
+            break
+    return blocked, block_reason
+
+
+def fetch_page(url: str, timeout=15):
+    """Fetch a VLR URL. Always returns (soup_or_none, meta) so callers can report the exact failure."""
+    meta = {
+        "url": url,
+        "status": None,
+        "ok": False,
+        "blocked": False,
+        "block_reason": None,
+        "page_title": None,
+        "error": None,
+        "html_bytes": 0,
+    }
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
-        res.raise_for_status()
-        return BeautifulSoup(res.text, "html.parser")
-    except requests.RequestException:
+        res = requests.get(url, headers=HEADERS, timeout=timeout)
+        meta["status"] = res.status_code
+        meta["html_bytes"] = len(res.content or b"")
+        text = res.text or ""
+        soup = BeautifulSoup(text, "html.parser")
+        meta["page_title"] = _page_title(soup)
+        blocked, block_reason = _classify_vlr_response(res.status_code, text)
+        meta["blocked"] = blocked
+        meta["block_reason"] = block_reason
+        if res.ok and not blocked:
+            meta["ok"] = True
+            return soup, meta
+        meta["error"] = block_reason or f"HTTP {res.status_code}"
+        logger.warning(
+            "VLR fetch failed url=%s status=%s blocked=%s title=%r error=%s bytes=%s",
+            url, meta["status"], meta["blocked"], meta["page_title"], meta["error"], meta["html_bytes"],
+        )
+        return soup, meta
+    except requests.RequestException as exc:
+        meta["error"] = f"{exc.__class__.__name__}: {exc}"
+        logger.warning("VLR fetch error url=%s error=%s", url, meta["error"])
+        return None, meta
+
+
+def fetch_soup(url: str):
+    """Fetch HTML and parse with BeautifulSoup. Returns None if the page was blocked or failed."""
+    soup, meta = fetch_page(url)
+    if not meta.get("ok"):
         return None
+    return soup
+
+
+def _player_url_from_href(href: str):
+    """Turn a search/profile href into https://www.vlr.gg/player/{id}.
+
+    Current VLR search results use /search/r/player/{id}/idx (302 to the profile).
+    Older pages used /player/{id}/{slug} directly.
+    """
+    if not href:
+        return None
+    match = re.search(r"/player/(\d+)", href)
+    if match:
+        return f"{BASE_URL}/player/{match.group(1)}"
+    if href.startswith("/"):
+        return BASE_URL + href
+    return href
+
+
+def _search_query_variants(player_name: str):
+    """Underdog names sometimes include spaces VLR does not (e.g. 'luk xo' vs 'lukxo')."""
+    name = (player_name or "").strip()
+    variants = []
+    seen = set()
+
+    def add(query):
+        if query and query.lower() not in seen:
+            seen.add(query.lower())
+            variants.append(query)
+
+    add(name)
+    add(name.replace(" ", ""))
+    add(re.sub(r"[\s._-]+", "", name))
+    return variants
+
+
+def _listed_result_count(soup):
+    text = soup.get_text(" ", strip=True)
+    match = re.search(r"Found\s+(\d+)\s+results?", text, re.I)
+    return int(match.group(1)) if match else None
+
+
+def _result_title(tag):
+    title_div = tag.select_one("div.search-item-title")
+    if title_div:
+        return title_div.get_text(strip=True)
+    return tag.get_text(" ", strip=True)
+
+
+def _collect_search_result_links(soup):
+    selectors = (
+        "a.wf-module-item.search-item",
+        "a.search-item",
+        "a[href*='/search/r/player/']",
+        "a[href*='/player/']",
+    )
+    for selector in selectors:
+        tags = [a for a in soup.select(selector) if "/player/" in (a.get("href") or "")]
+        if tags:
+            return tags, selector
+    return [], selectors[0]
+
+
+def _search_player_once(query: str):
+    search_url = f"{BASE_URL}/search/?q={quote(query)}&type=players"
+    soup, meta = fetch_page(search_url)
+    debug = {
+        "stage": "search",
+        "url": search_url,
+        "queried_as": query,
+        "status": meta.get("status"),
+        "blocked": meta.get("blocked"),
+        "block_reason": meta.get("block_reason"),
+        "page_title": meta.get("page_title"),
+        "fetch_error": meta.get("error"),
+        "selector": "a.wf-module-item.search-item",
+        "player_result_links": 0,
+        "player_hrefs_any": 0,
+        "listed_result_count": None,
+    }
+    if not meta.get("ok") or not soup:
+        debug["hint"] = (
+            f"Could not load VLR search ({meta.get('error') or meta.get('status')})."
+        )
+        return None, debug
+
+    debug["listed_result_count"] = _listed_result_count(soup)
+    debug["player_hrefs_any"] = len(soup.select("a[href*='/player/']"))
+    player_links, selector = _collect_search_result_links(soup)
+    debug["selector"] = selector
+    debug["player_result_links"] = len(player_links)
+    if not player_links:
+        listed = debug["listed_result_count"]
+        if listed == 0:
+            debug["hint"] = f'No VLR player named "{query}".'
+        elif listed and listed > 0:
+            debug["hint"] = (
+                f"Search listed {listed} results but 0 player links parsed "
+                f"(selector {selector}). VLR search HTML likely changed."
+            )
+        else:
+            debug["hint"] = (
+                f"Search returned HTTP 200 but 0 player result links "
+                f"(selector {selector}). VLR search HTML likely changed."
+            )
+        return None, debug
+
+    normalized_query = normalize_name(query)
+    for tag in player_links:
+        title = _result_title(tag)
+        if not title:
+            continue
+        if normalized_query in normalize_name(title) or normalize_name(title) in normalized_query:
+            url = _player_url_from_href(tag.get("href", ""))
+            debug["matched"] = title
+            return url, debug
+
+    url = _player_url_from_href(player_links[0].get("href", ""))
+    debug["matched"] = _result_title(player_links[0]) or None
+    debug["hint"] = f"No exact name match; using first search result ({debug['matched']})."
+    return url, debug
+
+
+def search_player(player_name: str):
+    """Search VLR for a player. Returns (url_or_none, debug dict)."""
+    last_debug = None
+    for query in _search_query_variants(player_name):
+        url, debug = _search_player_once(query)
+        last_debug = debug
+        if url:
+            if query != (player_name or "").strip():
+                debug["hint"] = f'Matched VLR name "{debug.get("matched")}" from query "{query}".'
+                logger.info(
+                    "VLR search matched player=%s queried_as=%s url=%s",
+                    player_name, query, url,
+                )
+            return url, debug
+        listed = debug.get("listed_result_count")
+        # Page claims results we couldn't parse — retrying name variants won't help.
+        if listed and listed > 0 and debug.get("player_result_links") == 0:
+            logger.warning("VLR search markup miss player=%s debug=%s", player_name, debug)
+            return None, debug
+        if debug.get("blocked") or debug.get("fetch_error"):
+            logger.warning("VLR search failed player=%s debug=%s", player_name, debug)
+            return None, debug
+
+    if last_debug:
+        logger.info("VLR search no match player=%s debug=%s", player_name, last_debug)
+        return None, last_debug
+    debug = {"stage": "search", "hint": "Empty player name."}
+    return None, debug
+
 
 def find_player_url(player_name: str):
-    search_url = f"{BASE_URL}/search/?q={player_name}&type=players"
-    res = requests.get(search_url, headers=HEADERS, timeout=15)
-    if not res.ok:
-        print(f"Failed to search for {player_name}")
-        return None
-
-    soup = BeautifulSoup(res.text, "html.parser")
-    normalized_query = normalize_name(player_name)
-    player_links = soup.select("a.wf-module-item.search-item")
-
-    for tag in player_links:
-        player_title_div = tag.select_one("div.search-item-title")
-        if not player_title_div:
-            continue
-        display_name = normalize_name(player_title_div.text)
-        if normalized_query in display_name:
-            href = tag.get('href', '')
-            # Make sure it's a direct player URL, not a search redirect
-            if href.startswith('/player/'):
-                return BASE_URL + href
-            elif '/player/' in href:
-                # Extract the player URL part
-                parts = href.split('/player/')
-                if len(parts) > 1:
-                    return BASE_URL + '/player/' + parts[1]
-            return BASE_URL + href
-
-    if player_links:
-        href = player_links[0].get('href', '')
-        if href.startswith('/player/'):
-            return BASE_URL + href
-        elif '/player/' in href:
-            parts = href.split('/player/')
-            if len(parts) > 1:
-                return BASE_URL + '/player/' + parts[1]
-        return BASE_URL + href
-
-    return None
+    url, _debug = search_player(player_name)
+    return url
 
 def scrape_player_name(soup: BeautifulSoup):
     """Extract the actual player display name from VLR player profile page"""
@@ -311,13 +494,42 @@ def get_match_from_team(team_url):
 #         stats_by_timespan[span] = agent_stats
 #     return stats_by_timespan
 
-def scrape_match_links(player_url):
+def scrape_match_links(player_url, diagnostics=None):
     """Scrape match links from player's match history page"""
     match_history_url = player_url.replace("/player/", "/player/matches/")
-    soup = fetch_soup(match_history_url)
-    
-    if not soup:
-        return []
+    soup, meta = fetch_page(match_history_url)
+    if diagnostics is not None:
+        diagnostics.update({
+            "stage": "match_history",
+            "url": match_history_url,
+            "status": meta.get("status"),
+            "blocked": meta.get("blocked"),
+            "block_reason": meta.get("block_reason"),
+            "page_title": meta.get("page_title"),
+            "fetch_error": meta.get("error"),
+        })
+
+    def _done(links):
+        if diagnostics is not None:
+            diagnostics["match_links"] = len(links)
+            if not links:
+                if not meta.get("ok"):
+                    diagnostics["hint"] = (
+                        f"Could not load match history ({meta.get('error') or meta.get('status')})."
+                    )
+                else:
+                    diagnostics["hint"] = (
+                        "Match history loaded (HTTP 200) but 0 match URLs found. "
+                        "VLR match-history HTML likely changed."
+                    )
+                logger.warning(
+                    "VLR match-history empty url=%s status=%s title=%r",
+                    match_history_url, meta.get("status"), meta.get("page_title"),
+                )
+        return links
+
+    if not meta.get("ok") or not soup:
+        return _done([])
     match_links = []
     match_ids = []  # Initialize to avoid used-before-assignment error
     
@@ -362,7 +574,7 @@ def scrape_match_links(player_url):
                 pass
     
     if match_links:
-        return match_links  # Return - we found matches!
+        return _done(match_links)  # Return - we found matches!
     
     # FALLBACK: Try data-match-id approach if no links found
     data_elements = soup.select("[data-match-id]")
@@ -384,7 +596,7 @@ def scrape_match_links(player_url):
                         match_links.append(match_url)
         
         if match_links:
-            return match_links
+            return _done(match_links)
     
     # Fallback: Try multiple selectors for match links
     # VLR uses different structures, so we'll try several approaches
@@ -500,7 +712,7 @@ def scrape_match_links(player_url):
         for key in attrs:
             if 'match' in key.lower() or 'game' in key.lower():
                 pass  # Could extract match data here if needed
-    return match_links
+    return _done(match_links)
 
 def get_match_title(soup):
     team_tags = soup.select("div.match-header-link-name .wf-title-med")
@@ -736,28 +948,97 @@ def extract_player_links_from_match(match_url):
         'match_url': match_url
     }
 
-def parse_match_page(match_url, player_name):
-    """Parse a match page to extract player's stats for each map"""
-    soup = fetch_soup(match_url)
-    if not soup:
+def _names_match(player_name, candidate):
+    a = normalize_name(player_name)
+    b = normalize_name(candidate)
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+def _parse_int(text):
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _player_stats_from_ovw_row(row, player_name):
+    """New VLR layout: div.ovw-row instead of <table>. Returns (agent, kills) or None."""
+    if "mod-head" in (row.get("class") or []):
+        return None
+    name_el = row.select_one(".ovw-player-name")
+    if not name_el:
+        return None
+    if not _names_match(player_name, name_el.get_text(strip=True)):
+        return None
+    agent = "<Unknown Agent>"
+    agent_img = row.select_one(".ovw-agents img[alt], .mod-agent img[alt]")
+    if agent_img and agent_img.get("alt"):
+        agent = agent_img["alt"].strip()
+    kills_el = (
+        row.select_one('.ovw-kda-stat[data-col="kills"] .side.mod-both')
+        or row.select_one('.ovw-kda-stat[data-col="kills"]')
+    )
+    kills = _parse_int(kills_el.get_text()) if kills_el else None
+    if kills is None:
+        kills = 0
+    return agent, kills
+
+
+def parse_match_page(match_url, player_name, meta_out=None):
+    """Parse a match page to extract player's stats for each map.
+
+    meta_out: optional dict filled with fetch/selector details so callers can
+    report the exact failure (blocked vs HTML change vs player not in tables).
+    """
+    soup, fetch_meta = fetch_page(match_url)
+    if meta_out is not None:
+        meta_out.update({
+            "url": match_url,
+            "status": fetch_meta.get("status"),
+            "blocked": fetch_meta.get("blocked"),
+            "block_reason": fetch_meta.get("block_reason"),
+            "page_title": fetch_meta.get("page_title"),
+            "fetch_error": fetch_meta.get("error"),
+        })
+    if not fetch_meta.get("ok") or not soup:
+        if meta_out is not None:
+            meta_out["reason"] = "fetch_failed"
         return []
 
     maps_data = []
     match_title = get_match_title(soup)
     match_date = get_match_date(soup)
 
+    tables = soup.select("table.wf-table-inset, table.wf-table")
+    ovw_rows = soup.select("div.ovw-row")
+    td_players = soup.select("td.mod-player")
+    ovw_players = soup.select("div.ovw-cell.mod-player")
+
     # Try multiple selectors for map sections
     map_sections = soup.select("div.vm-stats-game")
     if not map_sections:
         # Try alternative selector
         map_sections = soup.select("div[class*='stats-game'], div.match-stats-game")
-    
+
+    if meta_out is not None:
+        meta_out["tables"] = len(tables)
+        meta_out["ovw_rows"] = len(ovw_rows)
+        meta_out["td_mod_player"] = len(td_players)
+        meta_out["ovw_mod_player"] = len(ovw_players)
+        meta_out["vm_stats_game"] = len(map_sections)
+        meta_out["layout"] = "ovw" if ovw_rows else ("table" if tables else "unknown")
+
     if not map_sections:
+        if meta_out is not None and not meta_out.get("reason"):
+            meta_out["reason"] = "no_map_sections"
         return []
 
-    normalized_player = normalize_name(player_name)
-    
     for section in map_sections:
+        if (section.get("data-game-id") or "").lower() == "all":
+            continue
+
         # Try multiple ways to get map name
         map_name = None
         map_selectors = [
@@ -776,7 +1057,26 @@ def parse_match_page(match_url, player_name):
         if not map_name or map_name.lower() in ("all maps", "<unknown map>", ""):
             continue
 
-        # Try multiple selectors for player rows
+        found = False
+        for row in section.select("div.ovw-row"):
+            parsed = _player_stats_from_ovw_row(row, player_name)
+            if not parsed:
+                continue
+            agent, kills = parsed
+            maps_data.append({
+                "map": map_name,
+                "agent": agent,
+                "kills": kills,
+                "match_url": match_url,
+                "match_title": match_title,
+                "match_date": match_date
+            })
+            found = True
+            break
+        if found:
+            continue
+
+        # Legacy <table> layout (pre-2026 VLR match pages)
         rows = section.select("table.wf-table-inset tbody tr")
         if not rows:
             rows = section.select("table.wf-table tbody tr")
@@ -803,15 +1103,8 @@ def parse_match_page(match_url, player_name):
             
             # Get player name - try title attribute first, then text
             name = player_cell.get("title") or player_cell.get("data-title") or player_cell.text.strip()
-            if not name:
+            if not name or not _names_match(player_name, name):
                 continue
-                
-            # More flexible name matching
-            normalized_name = normalize_name(name)
-            if normalized_name != normalized_player:
-                # Try partial match (in case of nicknames or variations)
-                if normalized_player not in normalized_name and normalized_name not in normalized_player:
-                    continue
 
             # Get agent
             agent = "<Unknown Agent>"
@@ -859,6 +1152,12 @@ def parse_match_page(match_url, player_name):
             })
             break  # only one row per map for player
 
+    if meta_out is not None:
+        meta_out["maps_extracted"] = len(maps_data)
+        if maps_data:
+            meta_out["reason"] = "ok"
+        elif not meta_out.get("reason"):
+            meta_out["reason"] = "player_not_in_stats"
     return maps_data
 
 def group_kills_by_match(all_maps, player_name, max_maps=2):

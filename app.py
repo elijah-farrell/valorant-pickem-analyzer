@@ -1,8 +1,10 @@
 """Flask API backend for the Valorant pick'em analyzer."""
 
 import os
+import sys
 import uuid
 import json
+import logging
 import threading
 import queue
 import time
@@ -15,15 +17,30 @@ from flask_limiter.util import get_remote_address
 
 from clients.underdog import get_pickem_slate
 from scrapers.vlr import (
-    find_player_url,
+    search_player,
     scrape_current_team,
     scrape_player_name,
     scrape_match_links,
     parse_match_page,
     group_kills_by_match,
-    fetch_soup,
+    fetch_page,
     get_team_url_from_player,
 )
+
+def _configure_logging():
+    """Stdout logs so Render (and local `python app.py`) show scrape failures."""
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    root = logging.getLogger()
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    for name in ("vlr", "pickem", "underdog"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+_configure_logging()
+logger = logging.getLogger("pickem")
 
 # Detect if we're in development mode
 # Production (Render) will have ALLOWED_ORIGINS set
@@ -63,6 +80,10 @@ def update_progress(job_id, status, current, total, details=None, result=None):
         }
         if result is not None:
             progress_data['result'] = result
+        else:
+            prev = progress_store.get(job_id)
+            if prev and prev.get('result') is not None:
+                progress_data['result'] = prev['result']
         progress_store[job_id] = progress_data
         
         # Ensure queue exists (create if doesn't exist yet)
@@ -127,7 +148,7 @@ def progress_to_json(progress_data):
         'progress_pct': round((progress_data['current'] / progress_data['total']) * 100)
         if progress_data['total'] > 0 else 0,
     }
-    if progress_data['status'] == 'complete' and 'result' in progress_data:
+    if progress_data.get('result') is not None:
         data['result'] = progress_data['result']
     return data
 
@@ -139,10 +160,150 @@ def compute_averages(good_matches, windows=(5, 10, 25)):
     return averages
 
 
+def summarize_slate_diagnostics(results):
+    failed = [r for r in results if r.get('error')]
+    ok = len(results) - len(failed)
+    stages = {}
+    for r in failed:
+        stage = (r.get('debug') or {}).get('stage') or 'unknown'
+        stages[stage] = stages.get(stage, 0) + 1
+    sample = next((r for r in failed if (r.get('debug') or {}).get('stage') != 'skipped'), None)
+    if sample is None:
+        sample = failed[0] if failed else None
+    return {
+        'players_ok': ok,
+        'players_failed': len(failed),
+        'failure_stages': stages,
+        'sample_error': sample.get('error') if sample else None,
+        'sample_debug': sample.get('debug') if sample else None,
+    }
+
+
+def _is_systemic_vlr_failure(row):
+    """True when the next players would almost certainly fail the same way."""
+    if not row or not row.get('error'):
+        return False
+    debug = row.get('debug') or {}
+    if debug.get('stage') == 'skipped':
+        return False
+    if debug.get('blocked') or debug.get('block_reason'):
+        return True
+    if debug.get('status') in (401, 403, 429, 503):
+        return True
+    if debug.get('reason') in ('markup_changed_ovw', 'fetch_failed', 'no_map_sections'):
+        return True
+    if debug.get('stage') == 'search' and debug.get('status') == 200 and debug.get('player_result_links') == 0:
+        # 0 listed results is a name miss (e.g. Underdog "luk xo" vs VLR "lukxo"), not a site outage.
+        if debug.get('listed_result_count') == 0:
+            return False
+        return True
+    if debug.get('fetch_error') and debug.get('stage') in ('search', 'player_page', 'match_history', 'match_parse'):
+        return True
+    err = (row.get('error') or '').lower()
+    if 'layout changed' in err or 'html likely changed' in err or 'parser needs' in err:
+        return True
+    return False
+
+
+def _is_player_not_found(row):
+    debug = (row or {}).get('debug') or {}
+    return debug.get('stage') == 'search' and debug.get('listed_result_count') == 0
+
+
+def _should_abort_slate(results):
+    if not results:
+        return False
+    last = results[-1]
+    if _is_systemic_vlr_failure(last):
+        return True
+    if len(results) >= 2:
+        a, b = results[-2], results[-1]
+        if a.get('error') and b.get('error'):
+            if _is_player_not_found(a) or _is_player_not_found(b):
+                return False
+            sa = (a.get('debug') or {}).get('stage')
+            sb = (b.get('debug') or {}).get('stage')
+            if sa and sa == sb and sa != 'skipped':
+                return True
+    return False
+
+
+def _organize_players_by_match(results, all_matches_info, match_id_to_game):
+    players_by_match = {}
+    if len(all_matches_info) > 0:
+        match_id_to_results = {}
+        for player_result in results:
+            match_id = player_result.get('match_id')
+            if match_id:
+                if match_id not in match_id_to_results:
+                    match_id_to_results[match_id] = []
+                match_id_to_results[match_id].append(player_result)
+        for match_info in all_matches_info:
+            match_id = match_info.get('match_id')
+            match_key = match_info.get('match_key')
+            teams = match_info.get('teams', [])
+            if not match_key or len(teams) < 2:
+                continue
+            team1, team2 = teams[0], teams[1]
+            if match_key not in players_by_match:
+                players_by_match[match_key] = {'teams': [team1, team2], 'players': []}
+            match_players = match_id_to_results.get(match_id, [])
+            team1_players = []
+            team2_players = []
+            game = match_id_to_game.get(match_id)
+            if not game:
+                continue
+            home_team_id = game.get("home_team_id")
+            away_team_id = game.get("away_team_id")
+            for player_result in match_players:
+                player_team_id = player_result.get('team_id')
+                if not player_team_id:
+                    continue
+                if player_team_id == home_team_id:
+                    team1_players.append(player_result)
+                elif player_team_id == away_team_id:
+                    team2_players.append(player_result)
+            players_by_match[match_key]['players'].extend(team1_players)
+            players_by_match[match_key]['players'].extend(team2_players)
+        all_assigned_player_names = set()
+        for match_data in players_by_match.values():
+            for p in match_data['players']:
+                pname = p.get('player', '').strip()
+                if pname:
+                    all_assigned_player_names.add(pname)
+        for player_result in results:
+            pname = player_result.get('player', '').strip()
+            if pname and pname not in all_assigned_player_names:
+                if 'Other' not in players_by_match:
+                    players_by_match['Other'] = {'teams': [], 'players': []}
+                players_by_match['Other']['players'].append(player_result)
+                all_assigned_player_names.add(pname)
+    elif results:
+        players_by_match['All Players'] = {
+            'teams': [],
+            'players': results
+        }
+    return players_by_match
+
+
+def _slate_result(results, match_teams, match_url, all_matches_info, match_id_to_game, extra_diagnostics=None):
+    diagnostics = summarize_slate_diagnostics(results)
+    if extra_diagnostics:
+        diagnostics.update(extra_diagnostics)
+    return {
+        'players': results,
+        'match_teams': match_teams,
+        'match_url': match_url if match_url else None,
+        'players_by_match': _organize_players_by_match(results, all_matches_info, match_id_to_game),
+        'diagnostics': diagnostics,
+    }
+
+
 def get_player_vlr_kill_averages(player_name, progress_callback=None):
     """
     Shared VLR pipeline: find player -> fetch page -> scrape match links -> parse matches -> kill averages.
-    Returns dict with vlr_url, team_url, avg_last_5/10/25, good_matches, soup (for reuse), and error if any.
+    Returns dict with vlr_url, team_url, avg_last_5/10/25, good_matches, soup (for reuse),
+    error (human-readable), and debug (structured) if any.
     Used by both /api/slate and /api/player.
     
     progress_callback: Optional function(message, match_progress) to call with progress updates
@@ -156,27 +317,55 @@ def get_player_vlr_kill_averages(player_name, progress_callback=None):
         'good_matches': [],
         'soup': None,
         'error': None,
+        'debug': None,
     }
-    
-    if progress_callback:
-        progress_callback('Finding player on VLR.gg...', 0.005)
-    url = find_player_url(player_name)
-    if not url:
-        out['error'] = 'Player not found on VLR.gg'
+
+    def fail(stage, error, extra=None):
+        debug = {'stage': stage, 'vlr_url': out.get('vlr_url')}
+        if extra:
+            debug.update(extra)
+        out['error'] = error
+        out['debug'] = debug
+        logger.warning("VLR failed player=%s stage=%s error=%s debug=%s", player_name, stage, error, debug)
         return out
     
     if progress_callback:
+        progress_callback('Finding player on VLR.gg...', 0.005)
+    url, search_debug = search_player(player_name)
+    if not url:
+        if search_debug.get('blocked') or search_debug.get('fetch_error'):
+            msg = (
+                f"VLR search failed for {player_name}: "
+                f"{search_debug.get('block_reason') or search_debug.get('fetch_error') or search_debug.get('status')}."
+            )
+        elif search_debug.get('listed_result_count') == 0:
+            queried = search_debug.get('queried_as') or player_name
+            msg = f'Player "{player_name}" not found on VLR.gg'
+            if queried != player_name:
+                msg = f'{msg} (searched as "{queried}")'
+        elif search_debug.get('status') == 200 and search_debug.get('player_result_links') == 0:
+            msg = (
+                f"VLR search returned HTTP 200 but 0 player result links "
+                f"(selector {search_debug.get('selector')}). Search HTML may have changed."
+            )
+        else:
+            msg = f'Player "{player_name}" not found on VLR.gg'
+        return fail('search', msg, search_debug)
+    
+    if progress_callback:
         progress_callback('Loading player page...', 0.015)
-    soup = fetch_soup(url)
-    if not soup:
-        out['vlr_url'] = url
-        out['error'] = 'Failed to fetch player page'
+    soup, page_meta = fetch_page(url)
+    out['vlr_url'] = url
+    if not page_meta.get('ok') or not soup:
         try:
             out['team_url'] = get_team_url_from_player(url)
         except Exception:
             pass
-        return out
-    out['vlr_url'] = url
+        return fail(
+            'player_page',
+            f"Failed to fetch player page ({page_meta.get('error') or page_meta.get('status')}).",
+            page_meta,
+        )
     out['soup'] = soup
     try:
         out['team_url'] = get_team_url_from_player(url)
@@ -185,12 +374,16 @@ def get_player_vlr_kill_averages(player_name, progress_callback=None):
     
     if progress_callback:
         progress_callback('Scraping match history...', 0.03)
-    links = scrape_match_links(url)
+    hist_debug = {}
+    links = scrape_match_links(url, diagnostics=hist_debug)
     if not links:
-        out['error'] = 'No match history found'
         out['links_found'] = 0
         out['all_maps_count'] = 0
-        return out
+        return fail(
+            'match_history',
+            hist_debug.get('hint') or 'No match history found',
+            hist_debug,
+        )
     
     links_to_check = links[:MAX_MATCHES]
     total_matches = len(links_to_check)
@@ -198,6 +391,8 @@ def get_player_vlr_kill_averages(player_name, progress_callback=None):
     if progress_callback:
         progress_callback(f'Analyzing {total_matches} recent matches...', 0.05)
     all_maps = []
+    first_parse_meta = None
+    parse_exceptions = 0
     for idx, link in enumerate(links_to_check, 1):
         if progress_callback:
             # Parsing is ~95% of the time; map match progress into 0.05 -> 0.95
@@ -207,11 +402,32 @@ def get_player_vlr_kill_averages(player_name, progress_callback=None):
             else:
                 match_progress = 0.05
             progress_callback(f'Parsing match {idx}/{total_matches}...', match_progress)
+        parse_meta = {}
         try:
-            maps = parse_match_page(link, player_name)
+            maps = parse_match_page(link, player_name, meta_out=parse_meta)
             all_maps.extend(maps)
         except Exception:
+            parse_exceptions += 1
+            logger.exception("VLR parse_match_page crashed player=%s url=%s", player_name, link)
             continue
+        if first_parse_meta is None:
+            first_parse_meta = parse_meta
+        # Don't grind through all 40 pages if VLR is blocked or the layout is gone.
+        if not all_maps and idx >= 2:
+            reason = (first_parse_meta or {}).get('reason')
+            same_reason = parse_meta.get('reason') == reason
+            no_stats_ui = (
+                (first_parse_meta or {}).get('ovw_rows', 1) == 0
+                and (first_parse_meta or {}).get('tables', 1) == 0
+                and parse_meta.get('ovw_rows', 1) == 0
+                and parse_meta.get('tables', 1) == 0
+            )
+            if (reason in ('fetch_failed', 'no_map_sections', 'markup_changed_ovw') and same_reason) or no_stats_ui:
+                logger.warning(
+                    "Stopping match parse early player=%s after %s pages reason=%s",
+                    player_name, idx, reason,
+                )
+                break
     
     out['links_found'] = len(links)
     out['all_maps_count'] = len(all_maps)
@@ -220,14 +436,55 @@ def get_player_vlr_kill_averages(player_name, progress_callback=None):
         progress_callback('Calculating averages...', 0.99)
     good_matches = group_kills_by_match(all_maps, player_name, max_maps=2)
     if not good_matches:
-        out['error'] = 'No valid matches found (need matches with exactly 2 maps)'
-        return out
+        reason = (first_parse_meta or {}).get('reason')
+        debug = {
+            **(first_parse_meta or {}),
+            'links_found': len(links),
+            'links_checked': len(links_to_check),
+            'all_maps_count': len(all_maps),
+            'parse_exceptions': parse_exceptions,
+        }
+        if reason == 'markup_changed_ovw':
+            msg = (
+                "VLR match page layout changed: player stats are in div.ovw-row, "
+                "not table/td.mod-player. Parser needs an update."
+            )
+            debug['hint'] = (
+                f"Sample match had {debug.get('ovw_rows')} ovw-row and "
+                f"{debug.get('tables')} tables (title={debug.get('page_title')!r})."
+            )
+        elif reason == 'fetch_failed':
+            msg = (
+                f"Failed to fetch VLR match pages "
+                f"({(first_parse_meta or {}).get('fetch_error') or (first_parse_meta or {}).get('status')})."
+            )
+        elif not all_maps:
+            msg = (
+                f"Opened {len(links_to_check)} VLR match pages but extracted 0 map stats for {player_name}. "
+                "Name matching or stats selectors may be wrong."
+            )
+        else:
+            msg = (
+                f"Found {len(all_maps)} maps across matches but none had exactly 2 maps with kills."
+            )
+        return fail('match_parse', msg, debug)
     
     avgs = compute_averages(good_matches)
     out['avg_last_5'] = avgs[5]
     out['avg_last_10'] = avgs[10]
     out['avg_last_25'] = avgs[25]
     out['good_matches'] = good_matches
+    out['debug'] = {
+        'stage': 'ok',
+        'links_found': len(links),
+        'links_checked': len(links_to_check),
+        'all_maps_count': len(all_maps),
+        'good_matches': len(good_matches),
+    }
+    logger.info(
+        "VLR ok player=%s avg5=%s avg10=%s avg25=%s matches=%s",
+        player_name, avgs[5], avgs[10], avgs[25], len(good_matches),
+    )
     return out
 
 
@@ -527,6 +784,7 @@ def _process_slate_background(job_id, slate_response, match_url):
             return
         update_progress(job_id, 'loading', 0, total_players, ['Starting to fetch player stats from VLR.gg...'])
         results = []
+        abort_info = None
         for idx, player_data in enumerate(player_info, 1):
             player = player_data['player']
             line = player_data['line']
@@ -565,17 +823,69 @@ def _process_slate_background(job_id, slate_response, match_url):
                     'avg_last_10': r['avg_last_10'],
                     'avg_last_25': r['avg_last_25'],
                     'match_id': player_data.get('match_id'),
+                    'debug': r.get('debug'),
                 }
                 if r['error']:
                     row['error'] = r['error']
                 else:
                     row['matches_analyzed'] = len(r['good_matches'])
                 results.append(row)
-                update_progress(job_id, 'loading', idx, total_players, [
-                    f'Completed {player} ({idx}/{total_players})'
-                ])
+                detail = (
+                    f'{player} failed: {row["error"]}'
+                    if row.get('error')
+                    else f'Completed {player} ({idx}/{total_players})'
+                )
+                extra = None
+                remaining = player_info[idx:]
+                if remaining and _should_abort_slate(results):
+                    skip_err = (
+                        f'Skipped: stopped after a site-wide VLR failure on {player}. '
+                        f'{row.get("error") or "see first failure"}'
+                    )
+                    logger.warning(
+                        "Aborting slate early after %s/%s: %s",
+                        idx, total_players, row.get('error'),
+                    )
+                    for rest in remaining:
+                        results.append({
+                            'player': rest['player'],
+                            'line': rest['line'],
+                            'odds_over': rest['odds_over'],
+                            'odds_under': rest['odds_under'],
+                            'team': rest.get('team'),
+                            'team_id': rest.get('team_id'),
+                            'player_id': rest.get('player_id'),
+                            'team_url': None,
+                            'vlr_url': None,
+                            'avg_last_5': None,
+                            'avg_last_10': None,
+                            'avg_last_25': None,
+                            'error': skip_err,
+                            'debug': {'stage': 'skipped', 'stopped_after': player},
+                            'match_id': rest.get('match_id'),
+                        })
+                    extra = {
+                        'aborted_early': True,
+                        'skipped': len(remaining),
+                        'stopped_after': idx,
+                    }
+                    abort_info = extra
+                    detail = (
+                        f'Stopped early after {player} ({idx}/{total_players}): '
+                        f'{row.get("error")}. Skipping {len(remaining)} remaining players.'
+                    )
+                payload = _slate_result(
+                    results, match_teams, match_url, all_matches_info, match_id_to_game, extra
+                )
+                update_progress(
+                    job_id, 'loading', idx if not extra else total_players, total_players,
+                    [detail], payload,
+                )
+                if extra:
+                    break
             except Exception:
-                error_msg = "Error fetching player stats"
+                logger.exception("Error fetching player stats for %s", player)
+                error_msg = "Error fetching player stats (see server logs)"
                 results.append({
                     'player': player,
                     'line': line,
@@ -590,77 +900,41 @@ def _process_slate_background(job_id, slate_response, match_url):
                     'avg_last_10': None,
                     'avg_last_25': None,
                     'error': error_msg,
+                    'debug': {'stage': 'exception'},
                     'match_id': player_data.get('match_id')
                 })
+                update_progress(
+                    job_id, 'loading', idx, total_players,
+                    [f'{player} failed: {error_msg}'],
+                    _slate_result(results, match_teams, match_url, all_matches_info, match_id_to_game),
+                )
 
-        update_progress(job_id, 'loading', total_players, total_players, ['Organizing players by match...'])
-        players_by_match = {}
-        if len(all_matches_info) > 0:
-            match_id_to_match_info = {}
-            for match_info in all_matches_info:
-                match_id = match_info.get('match_id')
-                if match_id:
-                    match_id_to_match_info[match_id] = match_info
-            match_id_to_results = {}
-            for player_result in results:
-                match_id = player_result.get('match_id')
-                if match_id:
-                    if match_id not in match_id_to_results:
-                        match_id_to_results[match_id] = []
-                    match_id_to_results[match_id].append(player_result)
-            for match_info in all_matches_info:
-                match_id = match_info.get('match_id')
-                match_key = match_info.get('match_key')
-                teams = match_info.get('teams', [])
-                if not match_key or len(teams) < 2:
-                    continue
-                team1, team2 = teams[0], teams[1]
-                if match_key not in players_by_match:
-                    players_by_match[match_key] = {'teams': [team1, team2], 'players': []}
-                match_players = match_id_to_results.get(match_id, [])
-                team1_players = []
-                team2_players = []
-                game = match_id_to_game.get(match_id)
-                if not game:
-                    continue
-                home_team_id = game.get("home_team_id")
-                away_team_id = game.get("away_team_id")
-                for player_result in match_players:
-                    player_team_id = player_result.get('team_id')
-                    if not player_team_id:
-                        continue
-                    if player_team_id == home_team_id:
-                        team1_players.append(player_result)
-                    elif player_team_id == away_team_id:
-                        team2_players.append(player_result)
-                players_by_match[match_key]['players'].extend(team1_players)
-                players_by_match[match_key]['players'].extend(team2_players)
-            all_assigned_player_names = set()
-            for match_data in players_by_match.values():
-                for p in match_data['players']:
-                    pname = p.get('player', '').strip()
-                    if pname:
-                        all_assigned_player_names.add(pname)
-            for player_result in results:
-                pname = player_result.get('player', '').strip()
-                if pname and pname not in all_assigned_player_names:
-                    if 'Other' not in players_by_match:
-                        players_by_match['Other'] = {'teams': [], 'players': []}
-                    players_by_match['Other']['players'].append(player_result)
-                    all_assigned_player_names.add(pname)
+        final = _slate_result(
+            results, match_teams, match_url, all_matches_info, match_id_to_game, abort_info
+        )
+        diagnostics = final['diagnostics']
+        if diagnostics['players_failed']:
+            logger.warning(
+                "Slate complete ok=%s failed=%s stages=%s sample_error=%s aborted=%s",
+                diagnostics['players_ok'],
+                diagnostics['players_failed'],
+                diagnostics['failure_stages'],
+                diagnostics['sample_error'],
+                diagnostics.get('aborted_early'),
+            )
         else:
-            if results:
-                players_by_match['All Players'] = {
-                    'teams': [],
-                    'players': results
-                }
-        update_progress(job_id, 'complete', total_players, total_players, ['Complete! All players processed.'], {
-            'players': results,
-            'match_teams': match_teams,
-            'match_url': match_url if match_url else None,
-            'players_by_match': players_by_match
-        })
+            logger.info("Slate complete ok=%s failed=0", diagnostics['players_ok'])
+        done_msg = 'Complete! All players processed.'
+        if diagnostics.get('aborted_early'):
+            done_msg = (
+                f"Stopped early after {diagnostics.get('stopped_after')} player(s). "
+                f"{diagnostics.get('sample_error') or ''}"
+            ).strip()
+        update_progress(
+            job_id, 'complete', len(results), total_players, [done_msg], final
+        )
     except Exception as e:
+        logger.exception("Slate job failed job_id=%s", job_id)
         total = total_players if 'total_players' in locals() else 1
         update_progress(job_id, 'error', 0, total, [f'Error: {str(e)}'])
 
@@ -670,26 +944,25 @@ def get_player_stats(player_name):
     """Get detailed stats for a specific player. Uses shared get_player_vlr_kill_averages + VLR-only extras (name, team)."""
     try:
         r = get_player_vlr_kill_averages(player_name)
+        debug_info = r.get('debug') or {}
+        debug_info.update({
+            'links_found': r.get('links_found', 0),
+            'links_checked': min(r.get('links_found', 0), MAX_MATCHES),
+            'all_maps_count': r.get('all_maps_count', 0),
+            'good_matches_count': len(r.get('good_matches') or []),
+        })
 
         if r['error'] and not r['vlr_url']:
-            return jsonify({'error': f'Player "{player_name}" not found on VLR.gg'}), 404
-        if r['error'] == 'Failed to fetch player page':
-            return jsonify({'error': 'Failed to fetch player page from VLR.gg'}), 500
+            return jsonify({'error': r['error'], 'debug': debug_info}), 404
+        if r['error'] and (r.get('debug') or {}).get('stage') == 'player_page':
+            return jsonify({'error': r['error'], 'debug': debug_info}), 502
 
         actual_player_name = (scrape_player_name(r['soup']) or player_name) if r['soup'] else player_name
         team = scrape_current_team(r['soup']) if r['soup'] else None
         team_url = r['team_url']
         vlr_url = r['vlr_url']
-
-        links_found = r.get('links_found', 0)
-        all_maps_count = r.get('all_maps_count', 0)
         good_matches = r['good_matches']
-        debug_info = {
-            'links_found': links_found,
-            'links_checked': min(links_found, MAX_MATCHES),
-            'all_maps_count': all_maps_count,
-            'good_matches_count': len(good_matches),
-        }
+        all_maps_count = r.get('all_maps_count', 0)
 
         payload = {
             'player': actual_player_name,
@@ -710,6 +983,7 @@ def get_player_stats(player_name):
             payload['error'] = r['error']
         return jsonify(payload)
     except Exception:
+        logger.exception("Player stats request failed for %s", player_name)
         return jsonify({'error': 'Unable to fetch player stats. Please try again later.'}), 500
 
 def _is_production_runtime():

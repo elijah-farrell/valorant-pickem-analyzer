@@ -83,6 +83,10 @@ function updateProgress(current, total, details) {
         const latestDetail = details[details.length - 1];
         lastProgressDetail = latestDetail;
         progressDetails.innerHTML = `<div class="detail-item">${escapeHtml(latestDetail)}</div>`;
+        if (/failed|Stopped early/i.test(latestDetail)) {
+            document.getElementById('loadingDetails').classList.remove('hidden');
+            document.getElementById('toggleDetails').textContent = 'Hide Details';
+        }
     }
 }
 
@@ -92,8 +96,86 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function escapeAttr(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function playerErrorText(player) {
+    const err = (player.error || '').trim();
+    const hint = ((player.debug && player.debug.hint) || '').trim();
+    if (!hint || err.includes(hint)) {
+        return err;
+    }
+    if (err && hint.includes(err)) {
+        return hint;
+    }
+    return [err, hint].filter(Boolean).join(' ');
+}
+
+function statusCell(player) {
+    if (!player.error) {
+        return '<td class="success-cell">✓</td>';
+    }
+    return (
+        '<td class="status-cell">' +
+        '<span class="error-icon" aria-hidden="true">⚠️</span> ' +
+        '<button type="button" class="btn-row-details" aria-expanded="false">Details</button>' +
+        '</td>'
+    );
+}
+
+function playerRowHtml(player) {
+    const hasError = Boolean(player.error);
+    const rowClass = hasError ? 'error-row' : '';
+    let html = `<tr class="${rowClass}">`;
+    if (player.vlr_url) {
+        html += `<td><strong><a href="${escapeAttr(player.vlr_url)}" target="_blank" style="color: inherit; text-decoration: none;">${escapeHtml(player.player)}</a></strong></td>`;
+    } else {
+        html += `<td><strong>${escapeHtml(player.player)}</strong></td>`;
+    }
+    const teamLabel = cleanTeamName(player.team) || 'N/A';
+    if (player.team_url) {
+        html += `<td><a href="${escapeAttr(player.team_url)}" target="_blank" style="color: inherit; text-decoration: underline;">${escapeHtml(teamLabel)}</a></td>`;
+    } else {
+        html += `<td>${escapeHtml(teamLabel)}</td>`;
+    }
+    html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
+    html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
+    html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
+    html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
+    html += statusCell(player);
+    html += '</tr>';
+    if (hasError) {
+        html += `<tr class="error-detail-row hidden"><td colspan="7">${escapeHtml(playerErrorText(player))}</td></tr>`;
+    }
+    return html;
+}
+
+function diagnosticsBanner(data) {
+    const d = data.diagnostics;
+    if (!d) {
+        return '';
+    }
+    if (d.aborted_early) {
+        const skipped = d.skipped ? ` Skipped ${d.skipped} remaining players.` : '';
+        return `<div class="diag-banner" role="alert"><strong>Stopped early after ${d.stopped_after || 1} player(s).</strong>${skipped} Open Details on a player row for more.</div>`;
+    }
+    if (!d.players_failed) {
+        return '';
+    }
+    const total = d.players_ok + d.players_failed;
+    return `<div class="diag-banner" role="alert"><strong>${d.players_failed}/${total} players failed.</strong> Open Details on a player row for more.</div>`;
+}
+
 function applyProgressPayload(progress) {
     updateProgress(progress.current, progress.total, progress.details);
+    if (progress.result && progress.result.players && progress.status === 'loading') {
+        displaySlate(progress.result, { keepLoading: true });
+    }
     if (progress.status === 'complete') {
         stopProgressPolling();
         if (progress.result) {
@@ -276,25 +358,27 @@ function formatStat(value, line) {
     }
 }
 
-function displaySlate(data) {
+function displaySlate(data, options) {
+    const keepLoading = options && options.keepLoading;
     const resultsDiv = document.getElementById('results');
     
     // Check for no slate message
     if (data.message) {
         resultsDiv.innerHTML = `<div class="empty-state">${data.message}</div>`;
-        hideLoading();
+        if (!keepLoading) hideLoading();
         return;
     }
     
     if (!data.players || data.players.length === 0) {
         resultsDiv.innerHTML = '<div class="empty-state">No players found in the slate.</div>';
-        hideLoading();
+        if (!keepLoading) hideLoading();
         return;
     }
     
     // Organize by match if we have players_by_match data, otherwise fall back to team grouping
     const playersByMatch = data.players_by_match || {};
-    let html = '<div class="table-container">';
+    let html = diagnosticsBanner(data);
+    html += '<div class="table-container">';
     html += '<table>';
     html += '<thead>';
     html += '<tr>';
@@ -320,31 +404,7 @@ function displaySlate(data) {
                 // Backend has already organized players by team correctly
                 // Just display them in the order they come (team1 players first, then team2 players)
                 players.forEach(player => {
-                    const hasError = player.error;
-                    const rowClass = hasError ? 'error-row' : '';
-                    html += `<tr class="${rowClass}">`;
-                    // Player name as link
-                    if (player.vlr_url) {
-                        html += `<td><strong><a href="${player.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${player.player}</a></strong></td>`;
-                    } else {
-                        html += `<td><strong>${player.player}</strong></td>`;
-                    }
-                    // Team name as link - always use player.team from API (player's actual team)
-                    if (player.team_url) {
-                        html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
-                    } else {
-                        html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
-                    }
-                    html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
-                    html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
-                    html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
-                    html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
-                    if (hasError) {
-                        html += `<td class="error-cell" title="${player.error}">⚠️</td>`;
-                    } else {
-                        html += `<td class="success-cell">✓</td>`;
-                    }
-                    html += '</tr>';
+                    html += playerRowHtml(player);
                 });
             } else {
                 // Single team or other - just display all players grouped by team
@@ -361,31 +421,7 @@ function displaySlate(data) {
                 // Display each team's players together
                 Object.keys(playersByTeam).forEach(team => {
                     playersByTeam[team].forEach(player => {
-                        const hasError = player.error;
-                        const rowClass = hasError ? 'error-row' : '';
-                        html += `<tr class="${rowClass}">`;
-                        // Player name as link
-                        if (player.vlr_url) {
-                            html += `<td><strong><a href="${player.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${player.player}</a></strong></td>`;
-                        } else {
-                            html += `<td><strong>${player.player}</strong></td>`;
-                        }
-                        // Team name as link - always use player.team from API
-                        if (player.team_url) {
-                            html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
-                        } else {
-                            html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
-                        }
-                        html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
-                        html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
-                        html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
-                        html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
-                        if (hasError) {
-                            html += `<td class="error-cell" title="${player.error}">⚠️</td>`;
-                        } else {
-                            html += `<td class="success-cell">✓</td>`;
-                        }
-                        html += '</tr>';
+                        html += playerRowHtml(player);
                     });
                 });
             }
@@ -413,60 +449,12 @@ function displaySlate(data) {
         
         sortedTeams.forEach(team => {
             playersByTeam[team].forEach(player => {
-                const hasError = player.error;
-                const rowClass = hasError ? 'error-row' : '';
-                html += `<tr class="${rowClass}">`;
-                // Player name as link
-                if (player.vlr_url) {
-                    html += `<td><strong><a href="${player.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${player.player}</a></strong></td>`;
-                } else {
-                    html += `<td><strong>${player.player}</strong></td>`;
-                }
-                // Team name as link - always use player.team from API
-                if (player.team_url) {
-                    html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
-                } else {
-                    html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
-                }
-                html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
-                html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
-                html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
-                html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
-                if (hasError) {
-                    html += `<td class="error-cell" title="${player.error}">⚠️</td>`;
-                } else {
-                    html += `<td class="success-cell">✓</td>`;
-                }
-                html += '</tr>';
+                html += playerRowHtml(player);
             });
         });
         
         playersWithoutTeam.forEach(player => {
-            const hasError = player.error;
-            const rowClass = hasError ? 'error-row' : '';
-            html += `<tr class="${rowClass}">`;
-            // Player name as link
-            if (player.vlr_url) {
-                html += `<td><strong><a href="${player.vlr_url}" target="_blank" style="color: inherit; text-decoration: none;">${player.player}</a></strong></td>`;
-            } else {
-                html += `<td><strong>${player.player}</strong></td>`;
-            }
-            // Team name as link
-            if (player.team_url) {
-                html += `<td><a href="${player.team_url}" target="_blank" style="color: inherit; text-decoration: underline;">${cleanTeamName(player.team) || 'N/A'}</a></td>`;
-            } else {
-                html += `<td>${cleanTeamName(player.team) || 'N/A'}</td>`;
-            }
-            html += `<td class="stat-cell">${player.line || 'N/A'}</td>`;
-            html += `<td>${formatStat(player.avg_last_5, player.line)}</td>`;
-            html += `<td>${formatStat(player.avg_last_10, player.line)}</td>`;
-            html += `<td>${formatStat(player.avg_last_25, player.line)}</td>`;
-            if (hasError) {
-                html += `<td class="error-cell" title="${player.error}">⚠️</td>`;
-            } else {
-                html += `<td class="success-cell">✓</td>`;
-            }
-            html += '</tr>';
+            html += playerRowHtml(player);
         });
     }
     
@@ -475,7 +463,7 @@ function displaySlate(data) {
     html += '</div>';
     
     resultsDiv.innerHTML = html;
-    hideLoading();
+    if (!keepLoading) hideLoading();
 }
 
 async function loadSlate() {
@@ -538,13 +526,15 @@ async function searchPlayer() {
     
     try {
         const response = await fetch(`${API_BASE}/player/${encodeURIComponent(playerName)}`);
-        if (!response.ok) {
-            if (response.status === 404) {
-                throw new Error('Player not found on VLR.gg');
-            }
-            throw new Error(`HTTP error! status: ${response.status}`);
+        let data;
+        try {
+            data = await response.json();
+        } catch (parseErr) {
+            throw new Error('Invalid response from server (not JSON).');
         }
-        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || `HTTP error! status: ${response.status}`);
+        }
         displayPlayerStats(data);
     } catch (error) {
         showError(`Failed to load player stats: ${error.message}`);
@@ -573,6 +563,12 @@ function displayPlayerStats(data) {
     }
     html += '</div>';
     html += '</div>';
+    if (data.error) {
+        html += '<div class="player-error-wrap">';
+        html += '<button type="button" class="btn-row-details" aria-expanded="false">Details</button>';
+        html += `<div class="player-error-detail hidden">${escapeHtml(data.error)}</div>`;
+        html += '</div>';
+    }
     
     html += '<table>';
     html += '<thead>';
@@ -711,6 +707,26 @@ document.getElementById('playerSearch').addEventListener('keypress', (e) => {
 
 // Delegate event listener for "Show More" button (since it's dynamically created)
 document.addEventListener('click', (e) => {
+    const detailsBtn = e.target.closest && e.target.closest('.btn-row-details');
+    if (detailsBtn) {
+        const row = detailsBtn.closest('tr');
+        const detailRow = row && row.nextElementSibling;
+        if (detailRow && detailRow.classList.contains('error-detail-row')) {
+            const open = detailRow.classList.contains('hidden');
+            detailRow.classList.toggle('hidden', !open);
+            detailsBtn.textContent = open ? 'Hide' : 'Details';
+            detailsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            return;
+        }
+        const panel = detailsBtn.parentElement && detailsBtn.parentElement.querySelector('.player-error-detail');
+        if (panel) {
+            const open = panel.classList.contains('hidden');
+            panel.classList.toggle('hidden', !open);
+            detailsBtn.textContent = open ? 'Hide' : 'Details';
+            detailsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        return;
+    }
     if (e.target && e.target.id === 'showMoreMatches') {
         showMoreMatches();
     }
